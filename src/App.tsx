@@ -573,51 +573,70 @@ export default function App() {
     }
   };
 
+  const [spinRotation, setSpinRotation] = useState(0);
+
   const handleSpin = async () => {
     if (isSpinning || !auth.currentUser || !profile || (profile.spts || 0) < 10) return;
 
     setIsSpinning(true);
     setSpinResult(null);
 
-    // Weighted Probability Logic
-    // 100 Stars 1% (0-1)
-    // 50 Stars 1.5% (1-2.5)
-    // 25 Stars 2% (2.5-4.5)
-    // 15 Stars 2.5% (4.5-7)
-    // Try Again 10% (7-17)
-    // Good Luck 83% (17-100)
-    
     const rng = Math.random() * 100;
     let prize = 0;
     let resultType: 'stars' | 'try_again' | 'good_luck' = 'good_luck';
     let resultMsg = "";
+    let targetRotation = 0;
 
+    // Segment mappings (based on the UI segments rotation):
+    // 0 deg: 100 Stars
+    // 60 deg: Luck/Good Luck
+    // 120 deg: 15 Stars
+    // 180 deg: Try Again
+    // 240 deg: 50 Stars
+    // 300 deg: 25 Stars
+    // Note: Conic gradient and labels might need alignment. 
+    // In my UI:
+    // 0: 100
+    // 60: Luck (Good Luck)
+    // 120: 15
+    // 180: Try Again
+    // 240: 50
+    // 300: 25
+    
     if (rng < 1) {
       prize = 100;
       resultType = 'stars';
       resultMsg = "JACKPOT! 100 STARS! 🌟";
+      targetRotation = 360 * 5 + 0; 
     } else if (rng < 2.5) {
       prize = 50;
       resultType = 'stars';
       resultMsg = "MEGA WIN! 50 STARS! ⭐";
+      targetRotation = 360 * 5 + 240;
     } else if (rng < 4.5) {
       prize = 25;
       resultType = 'stars';
       resultMsg = "BIG WIN! 25 STARS! ✨";
+      targetRotation = 360 * 5 + 300;
     } else if (rng < 7) {
       prize = 15;
       resultType = 'stars';
       resultMsg = "NICE! 15 STARS! 💫";
+      targetRotation = 360 * 5 + 120;
     } else if (rng < 17) {
       resultType = 'try_again';
       resultMsg = "TRY AGAIN! FREE SPIN! 🔄";
+      targetRotation = 360 * 5 + 180;
     } else {
       resultType = 'good_luck';
       resultMsg = "BETTER LUCK NEXT TIME! 🍀";
+      targetRotation = 360 * 5 + 60;
     }
 
+    setSpinRotation(targetRotation);
+
     // Simulate animation delay
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, 4000));
 
     const userDocPath = `users/${auth.currentUser.uid}`;
     try {
@@ -653,6 +672,66 @@ export default function App() {
       handleFirestoreError(err, OperationType.UPDATE, userDocPath);
     } finally {
       setIsSpinning(false);
+    }
+  };
+
+  const handleStarWithdrawal = async () => {
+    if (!profile || !auth.currentUser || isWithdrawing) return;
+    
+    if ((profile.stars || 0) < 15) {
+      alert("You need at least 15 stars to withdraw!");
+      return;
+    }
+
+    setIsWithdrawing(true);
+    const userDocRef = doc(db, `users/${auth.currentUser.uid}`);
+    const withdrawalColRef = collection(db, `users/${auth.currentUser.uid}/withdrawals`);
+    const newWithdrawalDocRef = doc(withdrawalColRef);
+
+    try {
+      const batch = writeBatch(db);
+      
+      // 1. Deduct Stars
+      batch.update(userDocRef, {
+        stars: increment(-15),
+        updatedAt: serverTimestamp()
+      });
+
+      // 2. Create History Entry for Star withdrawal
+      batch.set(newWithdrawalDocRef, {
+        amount: 15,
+        type: 'stars',
+        method: 'stars_reward',
+        status: 'Pending',
+        createdAt: serverTimestamp(),
+        userId: auth.currentUser.uid
+      });
+
+      await batch.commit();
+
+      try {
+        (window as any).Telegram?.WebApp?.showAlert('🌟 Star Withdrawal Request Submitted!');
+        (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+      } catch {
+        alert('Star Withdrawal Request Submitted!');
+      }
+
+      // Automated transition to Success after 6 hours
+      setTimeout(async () => {
+        try {
+          const successBatch = writeBatch(db);
+          successBatch.update(newWithdrawalDocRef, { status: 'Success' });
+          await successBatch.commit();
+        } catch (e) {
+          console.error("Star withdrawal success update error:", e);
+        }
+      }, 6 * 60 * 60 * 1000);
+
+    } catch (err) {
+      console.error("Star Withdrawal Error:", err);
+      handleFirestoreError(err, OperationType.WRITE, userDocRef.path);
+    } finally {
+      setIsWithdrawing(false);
     }
   };
 
@@ -1206,30 +1285,79 @@ export default function App() {
                 animate={{ opacity: 1, y: 0 }}
                 className="bg-gradient-to-b from-yellow-500/10 to-transparent rounded-[32px] p-8 border border-yellow-500/30 text-center space-y-6"
               >
-                <div className="relative mx-auto w-48 h-48">
+                <div className="relative mx-auto w-64 h-64">
                   <motion.div 
-                    animate={isSpinning ? { rotate: 360 * 5 } : { rotate: 0 }}
-                    transition={isSpinning ? { duration: 3, ease: "easeOut" } : { duration: 0.5 }}
-                    className="w-full h-full rounded-full border-8 border-yellow-500/20 relative flex items-center justify-center overflow-hidden"
+                    animate={isSpinning ? { rotate: spinRotation } : { rotate: spinRotation % 360 }}
+                    transition={isSpinning ? { duration: 4, ease: [0.45, 0.05, 0.55, 0.95] } : { duration: 0.5 }}
+                    className="w-full h-full rounded-full border-8 border-yellow-500/20 relative flex items-center justify-center overflow-hidden shadow-[0_0_50px_rgba(234,179,8,0.2)]"
                   >
-                    <div className="absolute inset-0 bg-[conic-gradient(from_0deg,#EAB308_0deg_60deg,#CA8A04_60deg_120deg,#EAB308_120deg_180deg,#CA8A04_180deg_240deg,#EAB308_240deg_300deg,#CA8A04_300deg_360deg)] opacity-20" />
-                    <Star className={`w-16 h-16 text-yellow-500 fill-current ${isSpinning ? 'animate-pulse' : ''}`} />
+                    {/* Prize Segments */}
+                    {[
+                      { label: "100", color: "#EAB308", rotation: 0 },
+                      { label: "T-AGAIN", color: "#CA8A04", rotation: 60 },
+                      { label: "15", color: "#EAB308", rotation: 120 },
+                      { label: "LUCK", color: "#CA8A04", rotation: 180 },
+                      { label: "50", color: "#EAB308", rotation: 240 },
+                      { label: "25", color: "#CA8A04", rotation: 300 },
+                    ].map((prize, index) => (
+                      <div 
+                        key={index}
+                        className="absolute h-1/2 w-1 origin-bottom bottom-1/2 flex flex-col items-center pt-6"
+                        style={{ transform: `rotate(${prize.rotation}deg)` }}
+                      >
+                         <div className="text-[14px] font-black text-white -rotate-90 origin-center whitespace-nowrap bg-black/60 px-3 py-1.5 rounded-full border border-yellow-500/40 shadow-xl flex items-center gap-1">
+                            {prize.label} {prize.label !== "T-AGAIN" && prize.label !== "LUCK" ? "⭐" : ""}
+                         </div>
+                      </div>
+                    ))}
+                    
+                    <div className="absolute inset-0 bg-[conic-gradient(from_0deg,#EAB308_0deg_60deg,#CA8A04_60deg_120deg,#EAB308_120deg_180deg,#CA8A04_180deg_240deg,#EAB308_240deg_300deg,#CA8A04_300deg_360deg)] opacity-10" />
+                    <div className="w-20 h-20 rounded-full bg-black/90 flex items-center justify-center border-2 border-yellow-500/60 z-10 shadow-[0_0_30px_rgba(234,179,8,0.4)]">
+                      <Star className={`w-10 h-10 text-yellow-500 fill-current ${isSpinning ? 'animate-pulse' : ''}`} />
+                    </div>
                   </motion.div>
                   {/* Pin */}
-                  <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-2 w-4 h-6 bg-yellow-500 clip-path-triangle z-20" />
+                  <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-4 w-8 h-12 z-30 drop-shadow-2xl">
+                    <div className="w-full h-full bg-yellow-500 clip-path-triangle filter brightness-110 drop-shadow-md" />
+                  </div>
                 </div>
 
                 <div className="space-y-4">
-                  <h3 className="text-xl font-black text-white italic tracking-tighter">WIN UP TO 100 STARS!</h3>
+                  <h3 className="text-2xl font-black text-white italic tracking-tighter">GOOD LUCK! SPIN TO WIN!</h3>
                   <button 
                     onClick={handleSpin}
                     disabled={isSpinning}
-                    className="w-full h-16 rounded-2xl bg-yellow-500 text-black font-black text-lg shadow-[0_0_30px_rgba(234,179,8,0.3)] hover:scale-[1.02] transition-all flex items-center justify-center gap-3"
+                    className="w-full h-16 rounded-2xl bg-yellow-500 text-black font-black text-lg shadow-[0_0_40px_rgba(234,179,8,0.4)] hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-3 border-b-6 border-yellow-700 disabled:opacity-50"
                   >
                     {isSpinning ? <Loader2 className="w-6 h-6 animate-spin" /> : <Zap className="w-6 h-6 fill-current" />}
                     {isSpinning ? 'SPINNING...' : 'SPIN NOW (10 SPTS)'}
                   </button>
                 </div>
+              </motion.section>
+            )}
+
+            {/* Star Withdrawal Section */}
+            {(profile?.stars || 0) >= 15 && (
+              <motion.section 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-green-500/10 rounded-[32px] p-8 border border-green-500/20 text-center shadow-[0_12px_40px_rgba(16,185,129,0.1)] relative overflow-hidden"
+              >
+                <div className="w-16 h-16 bg-green-500/20 rounded-2xl flex items-center justify-center mx-auto mb-5 border border-green-500/30">
+                  <Wallet className="w-8 h-8 text-green-500" />
+                </div>
+                <h4 className="text-white text-2xl font-black italic uppercase tracking-tighter">STAR WITHDRAWAL UNLOCKED</h4>
+                <p className="text-xs text-[#A0AEC0] mt-2 mb-8 font-medium leading-relaxed max-w-[240px] mx-auto">
+                  You've reached the <span className="text-green-500 font-bold">15 Star Milestone</span>. Redeeming now will reset your star balance.
+                </p>
+                <button 
+                  onClick={handleStarWithdrawal}
+                  disabled={isWithdrawing}
+                  className="w-full py-5 rounded-2xl bg-green-500 text-black font-black text-sm uppercase tracking-[0.2em] shadow-xl shadow-green-500/30 active:translate-y-1 transition-all disabled:opacity-50 border-b-4 border-green-700"
+                >
+                  {isWithdrawing ? 'PROCESSING...' : 'CONFIRM WITHDRAWAL'}
+                </button>
+                <div className="absolute -right-8 -bottom-8 w-24 h-24 bg-green-500/5 rounded-full blur-2xl" />
               </motion.section>
             )}
 
@@ -1302,6 +1430,31 @@ export default function App() {
         ) : activeTab === 'wallet' ? (
           <div className="space-y-6 pb-10">
             <h2 className="text-2xl font-black text-white px-2">Withdraw</h2>
+            
+            {/* Star Withdrawal Promo in Wallet */}
+            {(profile?.stars || 0) >= 15 && (
+              <motion.div 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-gradient-to-r from-yellow-500/20 to-green-500/10 rounded-[28px] p-5 border border-yellow-500/30 mb-2 flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-yellow-500/20 flex items-center justify-center border border-yellow-500/30">
+                    <Star className="w-6 h-6 text-yellow-500 fill-current" />
+                  </div>
+                  <div>
+                    <h5 className="text-[11px] font-black text-white uppercase italic">Star Reward Ready!</h5>
+                    <p className="text-[9px] text-yellow-500/80 font-bold uppercase tracking-wider">Withdraw 15 Stars now</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setActiveTab('stars')}
+                  className="px-4 py-2 rounded-xl bg-yellow-500 text-black font-black text-[10px] uppercase tracking-wider shadow-lg shadow-yellow-500/20"
+                >
+                  GO TO STARS
+                </button>
+              </motion.div>
+            )}
             
             {/* Status Section */}
             <div className="grid grid-cols-1 gap-3">
@@ -1471,7 +1624,11 @@ export default function App() {
                        <div key={item.id} className="stats-card rounded-[24px] p-5 flex items-center justify-between border border-white/5">
                           <div className="flex items-center gap-4">
                              <div className="w-11 h-11 rounded-xl bg-white/5 flex items-center justify-center p-2.5">
-                               <img src={methodIcon} alt={item.method} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                                {isStarWithdrawal ? (
+                                  <Star className="w-6 h-6 text-yellow-500 fill-current" />
+                                ) : (
+                                  <img src={methodIcon} alt={item.method} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                                )}
                              </div>
                              <div>
                                <p className="text-sm font-black text-white uppercase tracking-tight">{item.amount} pts ≈ { Math.floor(item.amount * POINT_TO_USD) }$</p>
