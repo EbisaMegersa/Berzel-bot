@@ -603,6 +603,16 @@ export default function App() {
     // 240: 50
     // 300: 25
     
+    // Slot mappings (8 slots, 45deg each):
+    // 0: 100 Stars
+    // 45: Good Luck
+    // 90: 15 Stars
+    // 135: Try Again
+    // 180: 50 Stars
+    // 225: Good Luck
+    // 270: 25 Stars
+    // 315: Good Luck
+    
     if (rng < 1) {
       prize = 100;
       resultType = 'stars';
@@ -612,25 +622,27 @@ export default function App() {
       prize = 50;
       resultType = 'stars';
       resultMsg = "MEGA WIN! 50 STARS! ⭐";
-      targetRotation = 360 * 5 + 240;
+      targetRotation = 360 * 5 + 180;
     } else if (rng < 4.5) {
       prize = 25;
       resultType = 'stars';
       resultMsg = "BIG WIN! 25 STARS! ✨";
-      targetRotation = 360 * 5 + 300;
+      targetRotation = 360 * 5 + 270;
     } else if (rng < 7) {
       prize = 15;
       resultType = 'stars';
       resultMsg = "NICE! 15 STARS! 💫";
-      targetRotation = 360 * 5 + 120;
+      targetRotation = 360 * 5 + 90;
     } else if (rng < 17) {
       resultType = 'try_again';
       resultMsg = "TRY AGAIN! FREE SPIN! 🔄";
-      targetRotation = 360 * 5 + 180;
+      targetRotation = 360 * 5 + 135;
     } else {
       resultType = 'good_luck';
       resultMsg = "BETTER LUCK NEXT TIME! 🍀";
-      targetRotation = 360 * 5 + 60;
+      // Pick one of the 'Good Luck' slots [45, 225, 315]
+      const luckSlots = [45, 225, 315];
+      targetRotation = 360 * 5 + luckSlots[Math.floor(Math.random() * luckSlots.length)];
     }
 
     setSpinRotation(targetRotation);
@@ -1283,54 +1295,98 @@ export default function App() {
               <motion.section 
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="bg-gradient-to-b from-yellow-500/10 to-transparent rounded-[32px] p-8 border border-yellow-500/30 text-center space-y-6"
+                className="bg-gradient-to-b from-yellow-500/10 to-transparent rounded-[32px] p-8 border border-yellow-500/30 text-center space-y-8"
               >
-                <div className="relative mx-auto w-64 h-64">
+                <div className="relative mx-auto w-72 h-72">
+                  {/* Outer Ring with Lights */}
+                  <div className="absolute inset-[-12px] bg-[#1A237E] rounded-full border-4 border-[#1E88E5] shadow-[0_0_30px_rgba(26,35,126,0.5)] z-0">
+                    {[...Array(12)].map((_, i) => (
+                      <div 
+                        key={i}
+                        className="absolute w-3 h-3 bg-[#FFF59D] rounded-full shadow-[0_0_8px_#FFF59D]"
+                        style={{
+                          left: '50%',
+                          top: '50%',
+                          transform: `rotate(${i * 30}deg) translate(0, -140px) translateX(-50%) translateY(-50%)`
+                        }}
+                      />
+                    ))}
+                  </div>
+
                   <motion.div 
                     animate={isSpinning ? { rotate: spinRotation } : { rotate: spinRotation % 360 }}
                     transition={isSpinning ? { duration: 4, ease: [0.45, 0.05, 0.55, 0.95] } : { duration: 0.5 }}
-                    className="w-full h-full rounded-full border-8 border-yellow-500/20 relative flex items-center justify-center overflow-hidden shadow-[0_0_50px_rgba(234,179,8,0.2)]"
+                    className="w-full h-full rounded-full relative flex items-center justify-center overflow-hidden z-10 border-4 border-white/10"
                   >
-                    {/* Prize Segments */}
+                    {/* Prize Segments (Colors matching sample) */}
                     {[
-                      { label: "100", color: "#EAB308", rotation: 0 },
-                      { label: "T-AGAIN", color: "#CA8A04", rotation: 60 },
-                      { label: "15", color: "#EAB308", rotation: 120 },
-                      { label: "LUCK", color: "#CA8A04", rotation: 180 },
-                      { label: "50", color: "#EAB308", rotation: 240 },
-                      { label: "25", color: "#CA8A04", rotation: 300 },
+                      { label: "100", color: "#00E5FF", rotation: 0 },    // Cyan
+                      { label: "LUCK", color: "#F06292", rotation: 45 },   // Pink
+                      { label: "15", color: "#BA68C8", rotation: 90 },     // Purple
+                      { label: "TRY", color: "#FF8A65", rotation: 135 },    // Orange
+                      { label: "50", color: "#FF5252", rotation: 180 },    // Red
+                      { label: "LUCK", color: "#D81B60", rotation: 225 },   // Magenta
+                      { label: "25", color: "#00E676", rotation: 270 },    // Green
+                      { label: "LUCK", color: "#FFD600", rotation: 315 },   // Yellow
                     ].map((prize, index) => (
                       <div 
                         key={index}
-                        className="absolute h-1/2 w-1 origin-bottom bottom-1/2 flex flex-col items-center pt-6"
-                        style={{ transform: `rotate(${prize.rotation}deg)` }}
+                        className="absolute w-full h-full flex flex-col items-center pt-8"
+                        style={{ 
+                          transform: `rotate(${prize.rotation}deg)`,
+                          clipPath: 'polygon(50% 50%, 0% 0%, 100% 0%)',
+                          backgroundColor: prize.color
+                        }}
                       >
-                         <div className="text-[14px] font-black text-white -rotate-90 origin-center whitespace-nowrap bg-black/60 px-3 py-1.5 rounded-full border border-yellow-500/40 shadow-xl flex items-center gap-1">
-                            {prize.label} {prize.label !== "T-AGAIN" && prize.label !== "LUCK" ? "⭐" : ""}
+                         <div className="text-[14px] font-black text-white whitespace-nowrap drop-shadow-lg flex flex-col items-center mt-2">
+                            <span>{prize.label}</span>
+                            {prize.label !== "TRY" && prize.label !== "LUCK" ? "⭐" : ""}
                          </div>
                       </div>
                     ))}
                     
-                    <div className="absolute inset-0 bg-[conic-gradient(from_0deg,#EAB308_0deg_60deg,#CA8A04_60deg_120deg,#EAB308_120deg_180deg,#CA8A04_180deg_240deg,#EAB308_240deg_300deg,#CA8A04_300deg_360deg)] opacity-10" />
-                    <div className="w-20 h-20 rounded-full bg-black/90 flex items-center justify-center border-2 border-yellow-500/60 z-10 shadow-[0_0_30px_rgba(234,179,8,0.4)]">
-                      <Star className={`w-10 h-10 text-yellow-500 fill-current ${isSpinning ? 'animate-pulse' : ''}`} />
+                    {/* Center Button */}
+                    <div className="absolute inset-0 flex items-center justify-center z-20">
+                      <div className="w-24 h-24 rounded-full bg-[#0D47A1] border-4 border-white/20 shadow-2xl flex items-center justify-center">
+                        <span className="text-white font-black text-xs uppercase tracking-widest">SPIN</span>
+                      </div>
                     </div>
                   </motion.div>
-                  {/* Pin */}
-                  <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-4 w-8 h-12 z-30 drop-shadow-2xl">
-                    <div className="w-full h-full bg-yellow-500 clip-path-triangle filter brightness-110 drop-shadow-md" />
+
+                  {/* Top Pointer */}
+                  <div className="absolute top-[-20px] left-1/2 -translate-x-1/2 w-10 h-14 z-30 drop-shadow-2xl">
+                    <div className="w-full h-full bg-[#FFB300] clip-path-triangle filter brightness-110 drop-shadow-md" />
                   </div>
                 </div>
 
-                <div className="space-y-4">
-                  <h3 className="text-2xl font-black text-white italic tracking-tighter">GOOD LUCK! SPIN TO WIN!</h3>
+                <div className="space-y-6">
+                  {/* Prize Tiers Table */}
+                  <div className="bg-black/30 rounded-2xl p-4 border border-white/5 space-y-3">
+                    <h4 className="text-[10px] font-black text-yellow-500 uppercase tracking-[0.2em] mb-2">Prize Tiers</h4>
+                    <div className="space-y-2">
+                       {[
+                         { name: "100 Stars", prob: "1%", color: "text-blue-400" },
+                         { name: "50 Stars", prob: "1.5%", color: "text-red-400" },
+                         { name: "25 Stars", prob: "2%", color: "text-green-400" },
+                         { name: "15 Stars", prob: "2.5%", color: "text-purple-400" },
+                         { name: "Try Again", prob: "10%", color: "text-orange-400" },
+                         { name: "Good Luck", prob: "83%", color: "text-gray-400" }
+                       ].map((tier, i) => (
+                         <div key={i} className="flex justify-between items-center text-[11px]">
+                           <span className={`font-bold ${tier.color}`}>{tier.name}</span>
+                           <span className="text-white font-black opacity-40">{tier.prob}</span>
+                         </div>
+                       ))}
+                    </div>
+                  </div>
+
                   <button 
                     onClick={handleSpin}
                     disabled={isSpinning}
-                    className="w-full h-16 rounded-2xl bg-yellow-500 text-black font-black text-lg shadow-[0_0_40px_rgba(234,179,8,0.4)] hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-3 border-b-6 border-yellow-700 disabled:opacity-50"
+                    className="w-full h-16 rounded-2xl bg-yellow-500 text-black font-black text-lg shadow-[0_10px_40px_rgba(234,179,8,0.3)] hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-3 border-b-6 border-yellow-700 disabled:opacity-50"
                   >
                     {isSpinning ? <Loader2 className="w-6 h-6 animate-spin" /> : <Zap className="w-6 h-6 fill-current" />}
-                    {isSpinning ? 'SPINNING...' : 'SPIN NOW (10 SPTS)'}
+                    {isSpinning ? 'SPINNING...' : 'SPIN FOR 10 SPTS'}
                   </button>
                 </div>
               </motion.section>
@@ -1624,14 +1680,16 @@ export default function App() {
                        <div key={item.id} className="stats-card rounded-[24px] p-5 flex items-center justify-between border border-white/5">
                           <div className="flex items-center gap-4">
                              <div className="w-11 h-11 rounded-xl bg-white/5 flex items-center justify-center p-2.5">
-                                {isStarWithdrawal ? (
+                                {(item as any).type === 'stars' ? (
                                   <Star className="w-6 h-6 text-yellow-500 fill-current" />
                                 ) : (
                                   <img src={methodIcon} alt={item.method} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                                 )}
                              </div>
                              <div>
-                               <p className="text-sm font-black text-white uppercase tracking-tight">{item.amount} pts ≈ { Math.floor(item.amount * POINT_TO_USD) }$</p>
+                               <p className="text-sm font-black text-white uppercase tracking-tight">
+                                 {(item as any).type === 'stars' ? `${item.amount} Stars` : `${item.amount} pts ≈ ${Math.floor(item.amount * POINT_TO_USD)}$`}
+                               </p>
                                <p className="text-[9px] font-bold text-[#A0AEC0] uppercase opacity-60">
                                  {item.createdAt?.toMillis ? new Date(item.createdAt.toMillis()).toLocaleDateString() : 'Processing...'}
                                </p>
