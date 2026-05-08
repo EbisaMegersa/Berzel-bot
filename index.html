@@ -31,21 +31,22 @@
         function patchWebApp(obj) {
           if (!obj) return;
           try {
-            // Suppress SDK errors by forcing version
-            obj.version = highVersion;
+            // Only set version if it doesn't exist or is too low
+            if (!obj.version || parseFloat(obj.version) < 7.0) {
+              obj.version = highVersion;
+            }
             
-            // Override properties to be robust
-            Object.defineProperty(obj, 'version', { get: function() { return highVersion; }, configurable: true });
-            Object.defineProperty(obj, 'isVersionAtLeast', { value: function() { return true; }, configurable: true });
-            Object.defineProperty(obj, 'CloudStorage', { value: mockStorage, configurable: true });
-            Object.defineProperty(obj, 'showPopup', { value: mockShowPopup, configurable: true });
-            Object.defineProperty(obj, 'showAlert', { value: mockShowAlert, configurable: true });
+            // Add missing methods if they don't exist to prevent crashes
+            if (!obj.CloudStorage) obj.CloudStorage = mockStorage;
+            if (!obj.showPopup) obj.showPopup = mockShowPopup;
+            if (!obj.showAlert) obj.showAlert = mockShowAlert;
+            if (!obj.isVersionAtLeast) obj.isVersionAtLeast = function() { return true; };
 
-            if (obj.initDataUnsafe) {
+            if (obj.initDataUnsafe && (!obj.initDataUnsafe.version || parseFloat(obj.initDataUnsafe.version) < 7.0)) {
               obj.initDataUnsafe.version = highVersion;
             }
           } catch (e) {
-            console.warn("Patch failed", e);
+            console.warn("Patch skipped", e);
           }
         }
 

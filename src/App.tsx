@@ -383,10 +383,9 @@ export default function App() {
       }
     };
     
-    const adFn = (window as any).show_10937696;
-    if (typeof adFn === 'function') {
+    if (typeof (window as any).show_10937696 === 'function') {
       try {
-        adFn().then(() => {
+        (window as any).show_10937696().then(() => {
           try {
             (window as any).Telegram?.WebApp?.showAlert('You have seen an ad!');
           } catch {
@@ -486,10 +485,9 @@ export default function App() {
   };
 
   const handleMicroTaskVisit = (id: number) => {
-    const adFn = (window as any).show_10937696;
-    if (typeof adFn === 'function') {
+    if (typeof (window as any).show_10937696 === 'function') {
       // Rewarded interstitial
-      adFn().then(() => {
+      (window as any).show_10937696().then(() => {
         // You need to add your user reward function here, which will be executed after the user watches the ad.
         // For more details, please refer to the detailed instructions.
         alert('You have seen an ad!');
