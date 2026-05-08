@@ -492,11 +492,12 @@ export default function App() {
       adFn().then(() => {
         // You need to add your user reward function here, which will be executed after the user watches the ad.
         // For more details, please refer to the detailed instructions.
-        alert('Micro Task is done ✅');
+        alert('You have seen an ad!');
         setMicroTasksTimers(prev => ({ ...prev, [id]: 30 }));
         setMicroTasksActive(prev => ({ ...prev, [id]: true }));
       }).catch((e: any) => {
         console.error("Micro task ad error:", e);
+        // Still allow microtask timer to start on error so user isn't stuck
         setMicroTasksTimers(prev => ({ ...prev, [id]: 30 }));
         setMicroTasksActive(prev => ({ ...prev, [id]: true }));
       });
