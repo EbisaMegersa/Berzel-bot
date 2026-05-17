@@ -22,11 +22,12 @@ declare global {
 export default function App() {
   const [balance, setBalance] = useState<number | null>(null);
   const [adsWatched, setAdsWatched] = useState<number | null>(null);
-  const [username, setUsername] = useState<string>("Guest");
+  const [username, setUsername] = useState<string>("User");
   const [userId, setUserId] = useState<string>("guest");
   const [isWatching, setIsWatching] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Initialize Telegram and fetch data
   useEffect(() => {
@@ -56,11 +57,13 @@ export default function App() {
       })
       .catch(err => {
         console.error("API Error:", err);
+        setError("Failed to connect to rewards server");
         setLoading(false);
       });
   }, []);
 
   const startAd = () => {
+    setError(null);
     if (window.telegaAds) {
       setIsWatching(true);
       window.telegaAds.ad_show({
@@ -70,10 +73,14 @@ export default function App() {
           completeAd();
         } else {
           setIsWatching(false);
+          // Handle specific case where no ad was available from SDK
+          setError("No ads available right now. Please try again later.");
         }
       }).catch((err: any) => {
         console.error("SDK Error:", err);
         setIsWatching(false);
+        // Display the specific error message provided by the SDK
+        setError(err?.message || "No ad available at the moment");
       });
     } else {
       // Manual simulation if SDK is missing (e.g. local development)
@@ -156,7 +163,20 @@ export default function App() {
           <h2 className="text-5xl font-black text-slate-900 mb-2 leading-none">
             ${balance ?? 0}
           </h2>
-          <p className="text-slate-400 font-medium mb-10">Current Balance</p>
+          <p className="text-slate-400 font-medium mb-6">Current Balance</p>
+
+          <AnimatePresence>
+            {error && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="w-full bg-red-50 text-red-600 text-xs font-bold p-3 rounded-xl mb-6 border border-red-100"
+              >
+                {error}
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           <div className="grid grid-cols-2 gap-4 w-full mb-10">
             <div className="bg-slate-50 rounded-2xl p-4 flex flex-col items-center border border-slate-100">
