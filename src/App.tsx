@@ -14,6 +14,8 @@ declare global {
     Telegram?: {
       WebApp: any;
     };
+    TelegaIn?: any;
+    telegaAds?: any;
   }
 }
 
@@ -59,15 +61,33 @@ export default function App() {
   }, []);
 
   const startAd = () => {
-    setIsWatching(true);
-    setCountdown(5);
+    if (window.telegaAds) {
+      setIsWatching(true);
+      window.telegaAds.ad_show({
+        adBlockUuid: "e97a3084-fb7c-46f9-9f2b-dd876bc2bd47"
+      }).then((result: any) => {
+        if (result && result.done) {
+          completeAd();
+        } else {
+          setIsWatching(false);
+        }
+      }).catch((err: any) => {
+        console.error("SDK Error:", err);
+        setIsWatching(false);
+      });
+    } else {
+      // Manual simulation if SDK is missing (e.g. local development)
+      setIsWatching(true);
+      setCountdown(5);
+    }
   };
 
   useEffect(() => {
     if (isWatching && countdown > 0) {
       const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
       return () => clearTimeout(timer);
-    } else if (isWatching && countdown === 0) {
+    } else if (isWatching && countdown === 0 && !window.telegaAds) {
+      // Only complete simulated if SDK wasn't used
       completeAd();
     }
   }, [isWatching, countdown]);
@@ -188,9 +208,9 @@ export default function App() {
         Verified AdEarn Network
       </p>
 
-      {/* Ad Overlay */}
+      {/* Ad Overlay (Simulated fallback) */}
       <AnimatePresence>
-        {isWatching && (
+        {isWatching && !window.telegaAds && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
