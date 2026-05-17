@@ -1,6 +1,6 @@
 {
-  "name": "MadBot Rewards",
-  "description": "Earn points by watching ads and referring friends.",
+  "name": "AdEarn",
+  "description": "A beautiful watch-to-earn dashboard where users can earn rewards by watching advertisements.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
