@@ -5,20 +5,47 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Wallet, Play, Eye, TrendingUp, DollarSign, Loader2, Sparkles } from "lucide-react";
+import { Wallet, Play, Sparkles, User, Loader2, DollarSign, Eye } from "lucide-react";
 import confetti from "canvas-confetti";
 import { cn } from "./lib/utils";
+
+declare global {
+  interface Window {
+    Telegram?: {
+      WebApp: any;
+    };
+  }
+}
 
 export default function App() {
   const [balance, setBalance] = useState<number | null>(null);
   const [adsWatched, setAdsWatched] = useState<number | null>(null);
+  const [username, setUsername] = useState<string>("Guest");
+  const [userId, setUserId] = useState<string>("guest");
   const [isWatching, setIsWatching] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  // Fetch initial data
+  // Initialize Telegram and fetch data
   useEffect(() => {
-    fetch("/api/balance")
+    const tg = window.Telegram?.WebApp;
+    let currentUserId = "guest";
+    
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      const user = tg.initDataUnsafe?.user;
+      if (user) {
+        setUsername(user.username || user.first_name || "User");
+        currentUserId = String(user.id);
+        setUserId(currentUserId);
+      }
+    }
+
+    // Initial fetch
+    fetch("/api/balance", {
+      headers: { "x-user-id": currentUserId }
+    })
       .then((res) => res.json())
       .then((data) => {
         setBalance(data.balance);
@@ -33,7 +60,7 @@ export default function App() {
 
   const startAd = () => {
     setIsWatching(true);
-    setCountdown(5); // 5 second ad simulation
+    setCountdown(5);
   };
 
   useEffect(() => {
@@ -47,18 +74,20 @@ export default function App() {
 
   const completeAd = async () => {
     try {
-      const res = await fetch("/api/watch-ad", { method: "POST" });
+      const res = await fetch("/api/watch-ad", { 
+        method: "POST",
+        headers: { "x-user-id": userId }
+      });
       const data = await res.json();
       if (data.success) {
         setBalance(data.balance);
         setAdsWatched(data.adsWatched);
         
-        // Celebration!
         confetti({
-          particleCount: 100,
+          particleCount: 150,
           spread: 70,
           origin: { y: 0.6 },
-          colors: ["#22c55e", "#10b981", "#3b82f6"]
+          colors: ["#6366f1", "#10b981", "#fbbf24"]
         });
       }
     } catch (err) {
@@ -70,185 +99,137 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#f5f5f5] flex items-center justify-center">
+      <div className="min-h-screen bg-[#f8faff] flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#fafbff] text-slate-900 font-sans selection:bg-indigo-100">
-      {/* Top Navigation */}
-      <nav className="border-b border-indigo-100 bg-white/80 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
-              <Sparkles size={20} />
-            </div>
-            <span className="text-xl font-bold tracking-tight text-indigo-950">AdEarn</span>
-          </div>
-          <div className="flex items-center gap-4 bg-white border border-indigo-100 rounded-full px-4 py-1.5 shadow-sm">
-            <div className="flex items-center gap-1.5 text-indigo-600 font-semibold">
-              <DollarSign size={16} />
-              <span>{balance?.toFixed(2) || "0.00"}</span>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[#f8faff] text-slate-900 font-sans flex flex-col items-center justify-center p-4">
+      {/* User Info Header */}
+      <motion.div 
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex items-center gap-3 mb-8 bg-white px-6 py-3 rounded-2xl shadow-sm border border-indigo-50"
+      >
+        <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center text-indigo-600">
+          <User size={20} />
         </div>
-      </nav>
+        <div>
+          <p className="text-xs text-slate-400 font-medium uppercase tracking-wider leading-none mb-1">Welcome back</p>
+          <p className="text-sm font-bold text-slate-800">{username}</p>
+        </div>
+      </motion.div>
 
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-12">
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
-          
-          {/* Main Balance Card */}
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="md:col-span-8 bg-white rounded-3xl p-8 border border-white shadow-[0_8px_30px_rgb(0,0,0,0.04)] relative overflow-hidden group"
-            id="balance-card"
+      {/* Main Earn Box */}
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="w-full max-w-sm bg-white rounded-[2.5rem] p-10 shadow-[0_20px_50px_rgba(79,70,229,0.08)] border border-indigo-50 relative overflow-hidden"
+      >
+        <div className="relative z-10 flex flex-col items-center text-center">
+          <div className="w-20 h-20 bg-indigo-600 rounded-[1.8rem] flex items-center justify-center text-white shadow-xl shadow-indigo-200 mb-8 rotate-3">
+            <DollarSign size={36} />
+          </div>
+
+          <h2 className="text-5xl font-black text-slate-900 mb-2 leading-none">
+            ${balance ?? 0}
+          </h2>
+          <p className="text-slate-400 font-medium mb-10">Current Balance</p>
+
+          <div className="grid grid-cols-2 gap-4 w-full mb-10">
+            <div className="bg-slate-50 rounded-2xl p-4 flex flex-col items-center border border-slate-100">
+              <Eye size={20} className="text-indigo-400 mb-2" />
+              <div className="text-lg font-bold leading-none">{adsWatched ?? 0}</div>
+              <div className="text-[10px] text-slate-400 uppercase font-bold tracking-widest mt-1">Ads Watched</div>
+            </div>
+            <div className="bg-slate-50 rounded-2xl p-4 flex flex-col items-center border border-slate-100">
+              <Wallet size={20} className="text-emerald-400 mb-2" />
+              <div className="text-lg font-bold leading-none">$1.00</div>
+              <div className="text-[10px] text-slate-400 uppercase font-bold tracking-widest mt-1">Reward/Ad</div>
+            </div>
+          </div>
+
+          <motion.button
+            whileHover={!isWatching ? { scale: 1.05 } : {}}
+            whileTap={!isWatching ? { scale: 0.95 } : {}}
+            onClick={startAd}
+            disabled={isWatching}
+            className={cn(
+              "w-full py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all",
+              isWatching 
+                ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
+                : "bg-indigo-600 text-white shadow-[0_10px_30px_rgba(79,70,229,0.3)] hover:bg-indigo-700"
+            )}
+            id="watch-ads-btn"
           >
-            <div className="relative z-10">
-              <div className="flex items-center gap-2 text-indigo-500 mb-2 font-medium bg-indigo-50 w-fit px-3 py-1 rounded-full text-sm">
-                <TrendingUp size={14} />
-                Rewards Wallet
-              </div>
-              <h2 className="text-6xl font-black text-indigo-950 mb-1 flex items-baseline gap-1">
-                <span className="text-4xl text-indigo-300 font-normal">$</span>
-                {balance ?? 0}
-              </h2>
-              <p className="text-slate-500 mb-8">Earn credits by engaging with short advertisements.</p>
+            {isWatching ? (
+              <>
+                <Loader2 className="w-6 h-6 animate-spin" />
+                <span>PLaying ({countdown}s)</span>
+              </>
+            ) : (
+              <>
+                <Play size={20} fill="currentColor" />
+                <span>WATCH ADS NOW</span>
+              </>
+            )}
+          </motion.button>
+        </div>
+
+        {/* Decorative Elements */}
+        <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-full blur-3xl -mr-10 -mt-10 opacity-60" />
+        <div className="absolute bottom-0 left-0 w-32 h-32 bg-emerald-50 rounded-full blur-3xl -ml-10 -mb-10 opacity-40" />
+      </motion.div>
+
+      {/* Simple Footer */}
+      <p className="mt-8 text-slate-300 text-xs font-bold tracking-widest uppercase">
+        Verified AdEarn Network
+      </p>
+
+      {/* Ad Overlay */}
+      <AnimatePresence>
+        {isWatching && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/95 backdrop-blur-md"
+          >
+            <motion.div 
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              className="w-full max-w-lg aspect-square bg-white rounded-[3rem] p-12 flex flex-col items-center justify-center text-center relative overflow-hidden shadow-2xl"
+            >
+              <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/5 to-emerald-500/5" />
               
-              <div className="flex flex-wrap gap-8 mt-12 pt-8 border-t border-slate-50">
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center">
-                    <Eye size={24} />
-                  </div>
-                  <div>
-                    <div className="text-xl font-bold text-slate-800 leading-none">{adsWatched ?? 0}</div>
-                    <div className="text-xs text-slate-400 uppercase tracking-widest mt-1">Total Views</div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center">
-                    <Wallet size={24} />
-                  </div>
-                  <div>
-                    <div className="text-xl font-bold text-slate-800 leading-none">Instant</div>
-                    <div className="text-xs text-slate-400 uppercase tracking-widest mt-1">Payout Status</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            {/* Background Accent */}
-            <div className="absolute -top-12 -right-12 w-48 h-48 bg-indigo-50 rounded-full blur-3xl opacity-60 pointer-events-none" />
-          </motion.div>
-
-          {/* Action Card */}
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.1 }}
-            className="md:col-span-4 bg-indigo-600 rounded-3xl p-8 text-white flex flex-col justify-between shadow-xl shadow-indigo-200 relative overflow-hidden"
-            id="action-card"
-          >
-            <div className="relative z-10">
-              <h3 className="text-2xl font-bold mb-2">Claim $1.00</h3>
-              <p className="text-indigo-100 text-sm mb-6">Watch a brief 5-second advertisement to boost your balance.</p>
-            </div>
-
-            <motion.button
-              whileHover={!isWatching ? { scale: 1.02 } : {}}
-              whileTap={!isWatching ? { scale: 0.98 } : {}}
-              onClick={startAd}
-              disabled={isWatching}
-              className={cn(
-                "w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all relative z-10",
-                isWatching 
-                  ? "bg-indigo-700/50 cursor-not-allowed" 
-                  : "bg-white text-indigo-600 shadow-lg shadow-indigo-900/20"
-              )}
-              id="watch-ads-btn"
-            >
-              {isWatching ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Ad Playing ({countdown}s)</span>
-                </>
-              ) : (
-                <>
-                  <Play size={20} fill="currentColor" />
-                  <span>Watch Ad Now</span>
-                </>
-              )}
-            </motion.button>
-
-            {/* Background Graphic */}
-            <div className="absolute -bottom-8 -left-8 w-32 h-32 bg-white/10 rounded-full blur-2xl pointer-events-none" />
-          </motion.div>
-
-        </div>
-
-        {/* Ad Player Layer */}
-        <AnimatePresence>
-          {isWatching && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/95 backdrop-blur-xl"
-            >
               <motion.div 
-                initial={{ scale: 0.9, y: 20 }}
-                animate={{ scale: 1, y: 0 }}
-                className="w-full max-w-2xl aspect-video bg-zinc-900 rounded-3xl overflow-hidden shadow-2xl border border-white/5 relative flex flex-col items-center justify-center"
+                animate={{ scale: [1, 1.1, 1] }} 
+                transition={{ duration: 2, repeat: Infinity }}
+                className="w-24 h-24 bg-indigo-50 rounded-[2rem] flex items-center justify-center text-indigo-600 mb-8"
               >
-                <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/20 to-violet-500/20" />
-                
-                <div className="relative z-10 text-center">
-                  <motion.div 
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
-                    className="w-20 h-20 bg-indigo-500/20 backdrop-blur-md rounded-3xl flex items-center justify-center mx-auto mb-6 border border-white/10"
-                  >
-                    <Sparkles className="text-white w-10 h-10" />
-                  </motion.div>
-                  <h4 className="text-white text-2xl font-bold mb-2">Exclusive Preview</h4>
-                  <p className="text-indigo-200/60 text-sm max-w-sm mx-auto">Discover the future of digital rewards and premium experiences.</p>
-                </div>
-
-                <div className="absolute top-8 right-8 flex items-center gap-3">
-                  <div className="bg-black/40 backdrop-blur-md border border-white/10 px-4 py-2 rounded-full flex items-center gap-2 text-white font-mono text-sm">
-                    <span className="text-indigo-400 w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
-                    {countdown}S
-                  </div>
-                </div>
-
-                <div className="absolute bottom-0 left-0 w-full h-1 bg-zinc-800">
-                  <motion.div 
-                    initial={{ width: "0%" }}
-                    animate={{ width: "100%" }}
-                    transition={{ duration: 5, ease: "linear" }}
-                    className="h-full bg-indigo-500"
-                  />
-                </div>
-
-                <div className="absolute bottom-8 left-8 text-white/20 text-[10px] uppercase font-bold tracking-widest">
-                  Sponsored Content Partner
-                </div>
+                <Sparkles size={40} />
               </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+              
+              <h3 className="text-3xl font-black text-slate-900 mb-4">Amazing Product</h3>
+              <p className="text-slate-400 font-medium max-w-[200px] mb-8">This is where your sponsored content would be displayed.</p>
 
-      <footer className="max-w-4xl mx-auto px-4 py-12 border-t border-indigo-50 flex flex-col sm:flex-row justify-between items-center gap-6 text-slate-400 text-sm">
-        <div className="flex items-center gap-6">
-          <span className="hover:text-indigo-600 transition-colors cursor-pointer">Security</span>
-          <span className="hover:text-indigo-600 transition-colors cursor-pointer">Rewards Policy</span>
-          <span className="hover:text-indigo-600 transition-colors cursor-pointer">Contact</span>
-        </div>
-        <p>© 2024 AdEarn Inc. Verified Rewards Platform.</p>
-      </footer>
+              <div className="relative w-full h-1 bg-slate-100 rounded-full overflow-hidden mb-2">
+                <motion.div 
+                  initial={{ width: "0%" }}
+                  animate={{ width: "100%" }}
+                  transition={{ duration: 5, ease: "linear" }}
+                  className="h-full bg-indigo-600"
+                />
+              </div>
+              <div className="text-indigo-600 font-black text-sm tracking-widest">
+                {countdown} SECONDS REMAINING
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

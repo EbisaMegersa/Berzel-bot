@@ -8,20 +8,32 @@ async function startServer() {
 
   app.use(express.json());
 
-  // Mock database in memory
-  let balance = 0;
-  let adsWatched = 0;
+  // Mock database in memory (per user)
+  const userData = new Map<string, { balance: number; adsWatched: number }>();
+
+  function getUser(userId: string) {
+    if (!userData.has(userId)) {
+      userData.set(userId, { balance: 0, adsWatched: 0 });
+    }
+    return userData.get(userId)!;
+  }
 
   // API Routes
   app.get("/api/balance", (req, res) => {
-    res.json({ balance, adsWatched });
+    const userId = (req.headers["x-user-id"] as string) || "guest";
+    const data = getUser(userId);
+    res.json(data);
   });
 
   app.post("/api/watch-ad", (req, res) => {
+    const userId = (req.headers["x-user-id"] as string) || "guest";
+    const data = getUser(userId);
+    
     // Simulate some "server-side" ad processing
-    balance += 1;
-    adsWatched += 1;
-    res.json({ success: true, balance, adsWatched });
+    data.balance += 1;
+    data.adsWatched += 1;
+    
+    res.json({ success: true, ...data });
   });
 
   // Vite middleware for development
