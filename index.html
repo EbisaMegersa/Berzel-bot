@@ -3,18 +3,116 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <title>Jaallatamaa Rewards</title>
+    <script>
+      (function() {
+        // Suppress Telegram WebApp SDK version support error messages
+        var originalError = console.error;
+        console.error = function() {
+          if (arguments[0] && typeof arguments[0] === 'string' && (arguments[0].indexOf('is not supported') !== -1)) {
+            return;
+          }
+          originalError.apply(console, arguments);
+        };
+
+        var highVersion = '8.0';
+        var mockStorage = {
+          setItem: function(k, v, cb) { if(cb) cb(null, true); return this; },
+          getItem: function(k, cb) { if(cb) cb(null, null); return this; },
+          getItems: function(ks, cb) { if(cb) cb(null, {}); return this; },
+          removeItem: function(k, cb) { if(cb) cb(null, true); return this; },
+          removeItems: function(ks, cb) { if(cb) cb(null, true); return this; },
+          getKeys: function(cb) { if(cb) cb(null, []); return this; },
+          mocked: true
+        };
+
+        var mockShowPopup = function(params, callback) {
+          console.log('Mocked showPopup call suppressed:', params);
+          if (callback) callback(params.buttons ? params.buttons[0].id : null);
+        };
+
+        function patchWebApp(obj) {
+          if (!obj) return;
+          try {
+            // Force high version to enable CloudStorage and other features
+            Object.defineProperty(obj, 'version', { 
+              get: function() { return highVersion; },
+              set: function() { }, // Prevent overwriting
+              configurable: true 
+            });
+
+            if (!obj.version) obj.version = highVersion;
+
+            Object.defineProperty(obj, 'isVersionAtLeast', { 
+              value: function(ver) { 
+                console.log('Mocked isVersionAtLeast checked for:', ver);
+                return true; 
+              }, 
+              writable: true, 
+              configurable: true 
+            });
+
+            Object.defineProperty(obj, 'CloudStorage', { 
+              value: mockStorage, 
+              writable: true, 
+              configurable: true 
+            });
+
+            Object.defineProperty(obj, 'showPopup', { 
+              value: mockShowPopup, 
+              writable: true, 
+              configurable: true 
+            });
+
+            if (obj.initDataUnsafe) {
+              obj.initDataUnsafe.version = highVersion;
+            }
+          } catch (e) {
+            console.warn("Failed to patch Telegram WebApp", e);
+          }
+        }
+
+        // Periodic check to ensure the version and mock stay patched
+        setInterval(function() {
+          if (window.Telegram && window.Telegram.WebApp) {
+             var wa = window.Telegram.WebApp;
+             if (wa.version !== highVersion || !wa.CloudStorage || !wa.CloudStorage.mocked) {
+               patchWebApp(wa);
+             }
+          }
+        }, 50);
+
+        // Define Telegram with a robust getter/setter to catch WebApp initialization
+        var _tp = window.Telegram || {};
+        if (_tp.WebApp) patchWebApp(_tp.WebApp);
+        
+        Object.defineProperty(window, 'Telegram', {
+          get: function() { return _tp; },
+          set: function(val) {
+            _tp = val || {};
+            if (_tp.WebApp) patchWebApp(_tp.WebApp);
+          },
+          configurable: true
+        });
+
+        // Additional safeguard for scripts that might check window.Telegram.WebApp directly
+        if (!window.Telegram) {
+           window.Telegram = { WebApp: {} };
+           patchWebApp(window.Telegram.WebApp);
+        } else if (!window.Telegram.WebApp) {
+           window.Telegram.WebApp = {};
+           patchWebApp(window.Telegram.WebApp);
+        } else {
+           patchWebApp(window.Telegram.WebApp);
+        }
+      })();
+    </script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src='https://libtl.com/sdk.js' data-zone='10937696' data-sdk='show_10937696'></script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script src="https://inapp.telega.io/sdk/v1/sdk.js"></script>
-    <script>
-      window.telegaAds = window.TelegaIn.AdsController.create_miniapp({
-        token: 'adf26c5d-220d-4c80-990a-fe19fbde95de' 
-      });
-    </script>
   </body>
 </html>
 

@@ -3,273 +3,1812 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "motion/react";
-import { Wallet, Play, Sparkles, User, Loader2, DollarSign, Eye } from "lucide-react";
-import confetti from "canvas-confetti";
-import { cn } from "./lib/utils";
+import React, { useState, useEffect } from 'react';
+import { motion } from 'motion/react';
+import { 
+  MonitorPlay, 
+  Loader2, 
+  Home, 
+  Zap, 
+  Users, 
+  Wallet, 
+  User as UserIcon,
+  Play,
+  CircleDollarSign,
+  ArrowUpRight,
+  CheckCircle2,
+  Bell,
+  Check,
+  ExternalLink,
+  Share2,
+  Gift,
+  Copy,
+  Clock,
+  Trophy
+} from 'lucide-react';
+import { db, auth, authStatus } from './lib/firebase';
+import { doc, setDoc, updateDoc, serverTimestamp, onSnapshot, increment, query, collection, where, getDocs, limit, orderBy, addDoc, writeBatch } from 'firebase/firestore';
 
-declare global {
-  interface Window {
-    Telegram?: {
-      WebApp: any;
-    };
-    TelegaIn?: any;
-    telegaAds?: any;
+// --- Types ---
+interface UserProfile {
+  telegramId: number;
+  username: string;
+  adsWatched: number;
+  balance: number;
+  dailyStreak: number;
+  lastDailyClaim: any;
+  tasksCompleted: string[];
+  referralsCount: number;
+  total_invites: number;
+  consumedInvites: number;
+  referralEarnings: number;
+  invitedBy: string | null;
+  has_withdrawn: boolean;
+  adsSinceLastWithdrawal: number;
+  adsWatchedThisHour?: number;
+  lastHourlyAdReset?: any;
+  microTasksCompleted: number;
+  microTaskStats?: Record<string, { count: number; cooldownUntil: number }>;
+}
+
+interface WithdrawalHistory {
+  id: string;
+  amount: number;
+  method: string;
+  status: 'Pending' | 'Success' | 'Rejected';
+  createdAt: any;
+  address?: string;
+  uid?: string;
+  username?: string;
+  telegramId?: number;
+  email?: string;
+}
+
+const DAILY_REWARDS = [8, 12, 23, 32, 42, 58, 83]; // Points
+const POINT_TO_USD = 0.006;
+
+// --- Error Handling ---
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
   }
 }
 
-export default function App() {
-  const [balance, setBalance] = useState<number | null>(null);
-  const [adsWatched, setAdsWatched] = useState<number | null>(null);
-  const [username, setUsername] = useState<string>("User");
-  const [userId, setUserId] = useState<string>("guest");
-  const [isWatching, setIsWatching] = useState(false);
-  const [countdown, setCountdown] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
-  // Initialize Telegram and fetch data
+interface UserData {
+  id: number;
+  username: string;
+}
+
+export default function App() {
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [userData, setUserData] = useState<UserData | null>(null);
+  const [isWatching, setIsWatching] = useState(false);
+  const [isClaimingDaily, setIsClaimingDaily] = useState(false);
+  const [isVerifyingTask, setIsVerifyingTask] = useState(false);
+  const [hasClickedJoin, setHasClickedJoin] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('leaderboard');
+  const [error, setError] = useState<string | null>(null);
+  const [withdrawalMethod, setWithdrawalMethod] = useState('usdt_trc20');
+  const [withdrawalAmount, setWithdrawalAmount] = useState('');
+  const [withdrawalAddress, setWithdrawalAddress] = useState('');
+  const [withdrawalUid, setWithdrawalUid] = useState('');
+  const [isWithdrawing, setIsWithdrawing] = useState(false);
+  const [withdrawalHistory, setWithdrawalHistory] = useState<WithdrawalHistory[]>([]);
+  const [withdrawalSuccess, setWithdrawalSuccess] = useState(false);
+
+  // Leaderboard State
+  const [leaderboardCategory, setLeaderboardCategory] = useState<'invites' | 'ads' | 'microtasks'>('invites');
+  const [leaderboardUsers, setLeaderboardUsers] = useState<Record<'invites' | 'ads' | 'microtasks', any[]>>({
+    invites: [],
+    ads: [],
+    microtasks: []
+  });
+  const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
+
+  // Micro Tasks State
+  const [microTasksTimers, setMicroTasksTimers] = useState<Record<number, number>>({});
+  const [microTasksActive, setMicroTasksActive] = useState<Record<number, boolean>>({});
+  const [now, setNow] = useState(Date.now());
+
+  const [welcomeIndex, setWelcomeIndex] = useState(0);
+  const welcomeMessages = [
+    "Welcome to Task Tuner Rewards",
+    "Prepare for earning",
+    "Invite friends, grow together",
+    "Almost ready..."
+  ];
+
+  // Initialize Telegram & Data
   useEffect(() => {
-    const tg = window.Telegram?.WebApp;
-    let currentUserId = "guest";
-    
-    if (tg) {
+    const welcomeInterval = setInterval(() => {
+      setWelcomeIndex(prev => (prev + 1) % welcomeMessages.length);
+    }, 2000);
+
+    let unsubscribeAuth: (() => void) | undefined;
+    let unsubscribeProfile: (() => void) | undefined;
+    let unsubscribeHistory: (() => void) | undefined;
+
+    const extractStartParam = (tg: any) => {
+      if (tg.initDataUnsafe?.start_param) return tg.initDataUnsafe.start_param;
+      try {
+        const urlParams = new URLSearchParams(tg.initData);
+        return urlParams.get('start_param');
+      } catch (e) {
+        return null;
+      }
+    };
+
+    const init = async () => {
+      const tg = (window as any).Telegram?.WebApp;
+      if (!tg) {
+        setLoading(false);
+        return;
+      }
+
       tg.ready();
       tg.expand();
-      const user = tg.initDataUnsafe?.user;
-      if (user) {
-        setUsername(user.username || user.first_name || "User");
-        currentUserId = String(user.id);
-        setUserId(currentUserId);
+      
+      // Theme Integration: Green Professional Theme
+      try {
+        tg.setHeaderColor('#10B981');
+        tg.setBackgroundColor('#0B1010');
+      } catch (e) {
+        console.error("Theme set error", e);
       }
-    }
 
-    // Initial fetch
-    fetch("/api/balance", {
-      headers: { "x-user-id": currentUserId }
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setBalance(data.balance);
-        setAdsWatched(data.adsWatched);
+      if (!tg.initDataUnsafe?.user) {
         setLoading(false);
-      })
-      .catch(err => {
-        console.error("API Error:", err);
-        setError("Failed to connect to rewards server");
-        setLoading(false);
+        return;
+      }
+
+      const user = tg.initDataUnsafe.user;
+      
+      unsubscribeAuth = auth.onAuthStateChanged(async (firebaseUser) => {
+        if (!firebaseUser) {
+          if (authStatus.restricted) {
+            setError("AUTH_RESTRICTED");
+            setLoading(false);
+          }
+          return;
+        }
+
+        // Cleanup existing listeners if any
+        unsubscribeProfile?.();
+        unsubscribeHistory?.();
+
+        const userDocPath = `users/${firebaseUser.uid}`;
+        const inviterIdFromParam = extractStartParam(tg);
+        
+        const identity = {
+          id: user.id,
+          username: user.username || user.first_name || 'User'
+        };
+        setUserData(identity);
+
+        // Profile Listener
+        unsubscribeProfile = onSnapshot(doc(db, userDocPath), async (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+              setProfile({
+                telegramId: data.telegramId || 0,
+                username: data.username || 'User',
+                adsWatched: data.adsWatched || 0,
+                balance: data.balance || 0,
+                dailyStreak: data.dailyStreak || 0,
+                lastDailyClaim: data.lastDailyClaim,
+                tasksCompleted: data.tasksCompleted || [],
+                referralsCount: data.referralsCount || 0,
+                total_invites: data.total_invites || 0,
+                consumedInvites: data.consumedInvites || 0,
+                referralEarnings: data.referralEarnings || 0,
+                invitedBy: data.invitedBy || null,
+                has_withdrawn: data.has_withdrawn || false,
+                adsSinceLastWithdrawal: data.adsSinceLastWithdrawal || 0,
+                adsWatchedThisHour: data.adsWatchedThisHour || 0,
+                lastHourlyAdReset: data.lastHourlyAdReset,
+                microTasksCompleted: data.microTasksCompleted || 0,
+                microTaskStats: data.microTaskStats || {}
+              });
+            setLoading(false);
+          } else {
+            // NEW USER REGISTRATION
+            try {
+              let inviterIdStr = inviterIdFromParam ? String(inviterIdFromParam) : null;
+              if (inviterIdFromParam && String(inviterIdFromParam) !== String(user.id)) {
+                try {
+                  console.log("Processing Referral for inviter:", inviterIdFromParam);
+                  const inviterRef = collection(db, "users");
+                  const q = query(inviterRef, where("telegramId", "==", parseInt(String(inviterIdFromParam))), limit(1));
+                  const querySnapshot = await getDocs(q);
+                  
+                  if (!querySnapshot.empty) {
+                    const inviterDoc = querySnapshot.docs[0];
+                    // Record their Firestore ID if found, otherwise we keep the telegram ID string
+                    // But for "invitedBy" field, storing Telegram ID might be clearer if they are looking at it.
+                    // Let's store "tg_" prefix for clarity if it's just a raw ID.
+                    
+                    console.log("Found inviter doc:", inviterDoc.id);
+
+                    // Reward inviter (50 pts)
+                    await updateDoc(doc(db, "users", inviterDoc.id), {
+                      balance: increment(50),
+                      referralsCount: increment(1),
+                      total_invites: increment(1),
+                      referralEarnings: increment(50),
+                      updatedAt: serverTimestamp()
+                    });
+
+                    // Track in sub-collection for real-time join feed if needed later
+                    await setDoc(doc(db, `users/${inviterDoc.id}/referrals/${user.id}`), {
+                      telegramId: user.id,
+                      username: identity.username,
+                      joinedAt: serverTimestamp()
+                    });
+                    
+                    tg.showAlert(`Welcome! You got 10 points welcome bonus`);
+                    tg.HapticFeedback?.notificationOccurred('success');
+                  } else {
+                    console.warn("Inviter NOT found in database for ID:", inviterIdFromParam);
+                  }
+                } catch (refErr) {
+                  console.error("Referral Logic Failure:", refErr);
+                }
+              }
+              
+              const initialProfile = {
+                telegramId: user.id,
+                username: identity.username,
+                adsWatched: 0,
+                balance: inviterIdStr ? 10 : 0, // 10 pts welcome bonus if referred
+                dailyStreak: 0,
+                lastDailyClaim: null,
+                tasksCompleted: [],
+                referralsCount: 0,
+                total_invites: 0,
+                consumedInvites: 0,
+                referralEarnings: 0,
+                invitedBy: inviterIdStr,
+                has_withdrawn: false,
+                adsSinceLastWithdrawal: 0,
+                adsWatchedThisHour: 0,
+                lastHourlyAdReset: serverTimestamp(),
+                microTasksCompleted: 0,
+                microTaskStats: {},
+                updatedAt: serverTimestamp()
+              };
+              await setDoc(doc(db, userDocPath), initialProfile);
+            } catch (e) {
+              console.error("Registration Error", e);
+              setError("Failed to create profile. Try refreshing.");
+              setLoading(false);
+            }
+          }
+        }, (err) => {
+          console.error("Profile Snapshot Error", err);
+          setError("Database connection error. Try again later.");
+          setLoading(false);
+        });
+
+        // Withdrawal History Listener
+        const historyRef = collection(db, `${userDocPath}/withdrawals`);
+        // Note: orderBy requires index. If it fails, we'll know from console.
+        const qHistory = query(historyRef, orderBy('createdAt', 'desc'), limit(20));
+        unsubscribeHistory = onSnapshot(qHistory, (snapshot) => {
+          const history = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          } as WithdrawalHistory));
+          setWithdrawalHistory(history);
+        }, (err) => {
+          console.error("History Snapshot Error:", err);
+          // Fallback query if orderBy fails (no index yet?)
+          onSnapshot(query(historyRef, limit(20)), (snap) => {
+             const history = snap.docs.map(d => ({ id: d.id, ...d.data() } as WithdrawalHistory));
+             // Manual client-side sort as fallback
+             history.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+             setWithdrawalHistory(history);
+          });
+        });
       });
+    };
+
+    init();
+    return () => {
+      clearInterval(welcomeInterval);
+      unsubscribeAuth?.();
+      unsubscribeProfile?.();
+      unsubscribeHistory?.();
+    };
   }, []);
 
-  const startAd = () => {
-    setError(null);
-    if (window.telegaAds) {
-      setIsWatching(true);
-      window.telegaAds.ad_show({
-        adBlockUuid: "e97a3084-fb7c-46f9-9f2b-dd876bc2bd47"
-      }).then((result: any) => {
-        if (result && result.done) {
-          completeAd();
-        } else {
-          setIsWatching(false);
-          // Handle specific case where no ad was available from SDK
-          setError("No ads available right now. Please try again later.");
-        }
-      }).catch((err: any) => {
-        console.error("SDK Error:", err);
-        setIsWatching(false);
-        // Display the specific error message provided by the SDK
-        setError(err?.message || "No ad available at the moment");
+  // Timer Effect for Micro Tasks
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNow(Date.now());
+      setMicroTasksTimers(prev => {
+        const next = { ...prev };
+        let changed = false;
+        Object.keys(next).forEach(key => {
+          const id = parseInt(key);
+          if (next[id] > 0) {
+            const newVal = next[id] - 1;
+            next[id] = newVal;
+            changed = true;
+            
+            // Auto-claim logic: When timer finishes, if active, claim it.
+            if (newVal === 0 && microTasksActive[id]) {
+              handleMicroTaskClaim(id);
+            }
+          }
+        });
+        return changed ? next : prev;
       });
-    } else {
-      // Manual simulation if SDK is missing (e.g. local development)
-      setIsWatching(true);
-      setCountdown(5);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [microTasksActive, profile]); // Added dependencies to ensure auto-claim works with current state
+
+  // Fetch leaderboard data
+  const fetchLeaderboard = async (category: 'invites' | 'ads' | 'microtasks', force = false) => {
+    if (leaderboardUsers[category].length > 0 && !force) return;
+    setLoadingLeaderboard(true);
+    try {
+      const usersCol = collection(db, 'users');
+      let fieldToOrderBy = 'total_invites';
+      if (category === 'ads') {
+        fieldToOrderBy = 'adsWatched';
+      } else if (category === 'microtasks') {
+        fieldToOrderBy = 'microTasksCompleted';
+      }
+
+      const q = query(
+        usersCol,
+        orderBy(fieldToOrderBy, 'desc'),
+        limit(20)
+      );
+
+      const querySnapshot = await getDocs(q);
+      const results: any[] = [];
+      querySnapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        results.push({
+          id: docSnap.id,
+          username: data.username || 'Anonymous',
+          telegramId: data.telegramId || 0,
+          total_invites: data.total_invites || 0,
+          adsWatched: data.adsWatched || 0,
+          microTasksCompleted: data.microTasksCompleted || 0,
+          balance: data.balance || 0
+        });
+      });
+
+      setLeaderboardUsers(prev => ({
+         ...prev,
+         [category]: results
+      }));
+    } catch (err) {
+      console.error("Error fetching leaderboard for " + category + ":", err);
+    } finally {
+      setLoadingLeaderboard(false);
     }
   };
 
   useEffect(() => {
-    if (isWatching && countdown > 0) {
-      const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
-      return () => clearTimeout(timer);
-    } else if (isWatching && countdown === 0 && !window.telegaAds) {
-      // Only complete simulated if SDK wasn't used
-      completeAd();
+    if (activeTab === 'leaderboard') {
+      fetchLeaderboard(leaderboardCategory);
     }
-  }, [isWatching, countdown]);
+  }, [activeTab, leaderboardCategory]);
 
-  const completeAd = async () => {
-    try {
-      const res = await fetch("/api/watch-ad", { 
-        method: "POST",
-        headers: { "x-user-id": userId }
-      });
-      const data = await res.json();
-      if (data.success) {
-        setBalance(data.balance);
-        setAdsWatched(data.adsWatched);
+  const handleWatchAd = async () => {
+    if (isWatching || !auth.currentUser || !profile) return;
+    
+    // 15-minute reset logic
+    const lastReset = profile.lastHourlyAdReset ? profile.lastHourlyAdReset.toMillis() : 0;
+    const isNewPeriod = (Date.now() - lastReset >= 900000) || !profile.lastHourlyAdReset;
+    const currentCount = isNewPeriod ? 0 : (profile.adsWatchedThisHour || 0);
+
+    if (currentCount >= 15 && !isNewPeriod) {
+      return;
+    }
+
+    setIsWatching(true);
+
+    const rewardUser = async () => {
+      if (!auth.currentUser) return;
+      const userDocPath = `users/${auth.currentUser.uid}`;
+      try {
+        const updates: any = {
+          adsWatched: increment(1),
+          adsSinceLastWithdrawal: increment(1),
+          balance: increment(2), // 2 points per ad
+          adsWatchedThisHour: isNewPeriod ? 1 : increment(1),
+          updatedAt: serverTimestamp()
+        };
         
-        confetti({
-          particleCount: 150,
-          spread: 70,
-          origin: { y: 0.6 },
-          colors: ["#6366f1", "#10b981", "#fbbf24"]
-        });
+        if (isNewPeriod) {
+          updates.lastHourlyAdReset = serverTimestamp();
+        }
+
+        await updateDoc(doc(db, userDocPath), updates);
+        
+        try {
+          (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+        } catch {}
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, userDocPath);
+      } finally {
+        setIsWatching(false);
       }
+    };
+    
+    const adFn = (window as any).show_10937696;
+    if (typeof adFn === 'function') {
+      try {
+        // Rewarded interstitial (no 'pop')
+        adFn().then(() => {
+          try {
+            (window as any).Telegram?.WebApp?.showAlert('You have seen an ad!');
+          } catch {
+            alert('You have seen an ad!');
+          }
+          rewardUser();
+        }).catch((err: any) => {
+          console.error("Ad SDK error:", err);
+          const errMsg = String(err);
+          if (errMsg.includes('Empty feed')) {
+            try {
+              (window as any).Telegram?.WebApp?.showAlert('Ads are temporarily unavailable. Please try again in 5-10 minutes.');
+            } catch {
+              alert('Ads are temporarily unavailable. Please try again in 5-10 minutes.');
+            }
+          }
+          setIsWatching(false);
+        });
+      } catch (err) {
+        console.error("Ad SDK sync error:", err);
+        setIsWatching(false);
+      }
+    } else {
+      setTimeout(rewardUser, 3000);
+    }
+  };
+
+  const handleDailyCheckIn = async () => {
+    if (isClaimingDaily || !auth.currentUser || !profile) return;
+    
+    const now = Date.now();
+    const lastClaim = profile.lastDailyClaim ? profile.lastDailyClaim.toMillis() : 0;
+    const diffHours = (now - lastClaim) / (1000 * 60 * 60);
+
+    // Can only claim once every 24 hours
+    if (diffHours < 24 && profile.lastDailyClaim) {
+      alert(`Come back in ${Math.ceil(24 - diffHours)} hours!`);
+      return;
+    }
+
+    setIsClaimingDaily(true);
+    const userDocPath = `users/${auth.currentUser.uid}`;
+
+    try {
+      let newStreak = profile.dailyStreak;
+      
+      // If claimed more than 48 hours ago, reset streak (missed a day)
+      // Or if it's the very first claim
+      if (diffHours > 48 || !profile.lastDailyClaim) {
+        newStreak = 1;
+      } else {
+        newStreak = (newStreak % 7) + 1;
+      }
+
+      const reward = DAILY_REWARDS[newStreak - 1];
+
+      await updateDoc(doc(db, userDocPath), {
+        balance: increment(reward),
+        dailyStreak: newStreak,
+        lastDailyClaim: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+
+      try {
+        (window as any).Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium');
+      } catch {}
+
+      alert(`Day ${newStreak} Claimed! Reward: ${reward} points`);
     } catch (err) {
-      console.error("Failed to collect reward", err);
+      handleFirestoreError(err, OperationType.UPDATE, userDocPath);
     } finally {
-      setIsWatching(false);
+      setIsClaimingDaily(false);
+    }
+  };
+
+  const handleJoinTelegram = async () => {
+    if (isVerifyingTask || !auth.currentUser || !profile) return;
+    if (profile.tasksCompleted.includes('tg_join')) {
+      alert("Task already completed!");
+      return;
+    }
+
+    setIsVerifyingTask(true);
+    const userDocPath = `users/${auth.currentUser.uid}`;
+
+    try {
+      // Small delay to simulate verification
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      await updateDoc(doc(db, userDocPath), {
+        balance: increment(10), // 10 points for joining channel
+        tasksCompleted: [...profile.tasksCompleted, 'tg_join'],
+        updatedAt: serverTimestamp()
+      });
+
+      try {
+        (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+      } catch {}
+      alert("Successfully verified! 10 points added to your balance.");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, userDocPath);
+    } finally {
+      setIsVerifyingTask(false);
+    }
+  };
+
+  const handleMicroTaskVisit = (id: number) => {
+    const adFn = (window as any).show_10937696;
+    if (typeof adFn === 'function') {
+      // Rewarded Popup
+      adFn('pop').then(() => {
+        // user watch ad till the end or close it in interstitial format
+        // your code to reward user for rewarded format
+        alert('Micro Task is done ✅');
+        setMicroTasksTimers(prev => ({ ...prev, [id]: 30 }));
+        setMicroTasksActive(prev => ({ ...prev, [id]: true }));
+      }).catch((e: any) => {
+        console.error("Micro task ad error:", e);
+        const errMsg = String(e);
+        if (errMsg.includes('Empty feed')) {
+          try {
+            (window as any).Telegram?.WebApp?.showAlert('Ads are temporarily unavailable. Task timer started anyway to allow completion.');
+          } catch {
+            alert('Ads are temporarily unavailable. Task timer started anyway to allow completion.');
+          }
+        }
+        setMicroTasksTimers(prev => ({ ...prev, [id]: 30 }));
+        setMicroTasksActive(prev => ({ ...prev, [id]: true }));
+      });
+    } else {
+      // Fallback if ad SDK not loaded
+      setMicroTasksTimers(prev => ({ ...prev, [id]: 30 }));
+      setMicroTasksActive(prev => ({ ...prev, [id]: true }));
+    }
+  };
+
+  const handleMicroTaskClaim = async (id: number) => {
+    if (!auth.currentUser || !profile) return;
+
+    const userDocPath = `users/${auth.currentUser.uid}`;
+    const taskId = String(id);
+    const stats = profile.microTaskStats?.[taskId] || { count: 0, cooldownUntil: 0, periodStart: 0 };
+    
+    const nowTs = Date.now();
+    const periodDuration = 12 * 60 * 60 * 1000;
+    
+    let currentCount = stats.count;
+    let currentPeriodStart = stats.periodStart || 0;
+
+    // Check if period has ended
+    if (currentPeriodStart > 0 && nowTs - currentPeriodStart >= periodDuration) {
+      currentCount = 0;
+      currentPeriodStart = 0;
+    }
+
+    const newCount = currentCount + 1;
+    const isFirstInPeriod = currentPeriodStart === 0;
+    const newPeriodStart = isFirstInPeriod ? nowTs : currentPeriodStart;
+    const isLimitReached = newCount >= 15;
+    
+    try {
+      const updates: any = {
+        balance: increment(3), // 3 points per micro task
+        microTasksCompleted: increment(1),
+        [`microTaskStats.${taskId}.count`]: newCount,
+        [`microTaskStats.${taskId}.periodStart`]: newPeriodStart,
+        [`microTaskStats.${taskId}.cooldownUntil`]: isLimitReached ? newPeriodStart + periodDuration : 0,
+        updatedAt: serverTimestamp()
+      };
+
+      await updateDoc(doc(db, userDocPath), updates);
+      
+      try {
+        (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+        if (isLimitReached) {
+          (window as any).Telegram?.WebApp?.showAlert('Task Completed! 3 points added. Limit reached, next set in ' + new Date(newPeriodStart + periodDuration).toLocaleTimeString());
+        } else {
+          (window as any).Telegram?.WebApp?.showAlert(`Task Completed! 3 points added. (${newCount}/15 this period)`);
+        }
+      } catch {
+        if (isLimitReached) {
+          alert('Task Completed! 3 points added. Limit reached.');
+        } else {
+          alert(`Task Completed! 3 points added. (${newCount}/15 this period)`);
+        }
+      }
+
+      // Reset state for this task immediately so user can do it again (if not locked)
+      setMicroTasksActive(prev => ({ ...prev, [id]: false }));
+      setMicroTasksTimers(prev => ({ ...prev, [id]: 0 }));
+
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, userDocPath);
+    }
+  };
+
+  const referralLink = profile ? `https://t.me/Tunerttbot?startapp=${profile.telegramId}` : '';
+
+  const handleCopyLink = () => {
+    navigator.clipboard.writeText(referralLink);
+    try {
+      (window as any).Telegram?.WebApp?.showAlert('Referral link copied to clipboard!');
+      (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+    } catch {
+      alert('Copied!');
+    }
+  };
+
+  const handleShare = () => {
+    const text = encodeURIComponent("Join this bot and earn rewards! \ud83d\ude80");
+    const url = `https://t.me/share/url?url=${encodeURIComponent(referralLink)}&text=${text}`;
+    (window as any).Telegram?.WebApp?.openTelegramLink(url);
+  };
+
+  const handleWithdraw = async () => {
+    if (!profile || !auth.currentUser || isWithdrawing) return;
+
+    const amountNum = parseFloat(withdrawalAmount);
+    
+    // 1. Minimum Amount Check
+    if (isNaN(amountNum) || amountNum < 1667) {
+      alert('Minimum withdrawal is 1667 points.');
+      return;
+    }
+
+    // 2. Balance Check
+    if (amountNum > profile.balance) {
+      alert('Insufficient balance.');
+      return;
+    }
+
+      // 3. Lock System Check
+      const availableInvites = (profile.total_invites || 0) - (profile.consumedInvites || 0);
+      const adRequirement = 25;
+      const microtaskRequirement = 30;
+      
+      const meetsInvites = availableInvites >= 20;
+      const meetsAds = (profile.adsSinceLastWithdrawal || 0) >= adRequirement;
+      const meetsMicrotasks = (profile.microTasksCompleted || 0) >= microtaskRequirement;
+
+      if (!meetsInvites || !meetsAds || !meetsMicrotasks) {
+        let msg = "❌ Requirement Not Met:\n";
+        if (!meetsInvites) msg += `- Need 20 referrals (${availableInvites}/20)\n`;
+        if (!meetsAds) msg += `- Need 25 ad views (${profile.adsSinceLastWithdrawal}/25)\n`;
+        if (!meetsMicrotasks) msg += `- Need 30 microtasks (${profile.microTasksCompleted}/30)`;
+        
+        alert(msg);
+        try {
+          (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('error');
+        } catch {}
+        return;
+      }
+
+    // 4. Address Check (only if not Exchange)
+    const isExchange = (withdrawalMethod === 'binance');
+    if (!isExchange && !withdrawalAddress) {
+      alert('Please enter a valid wallet address.');
+      return;
+    }
+
+    // 5. UID Check for Exchanges
+    if (isExchange && !withdrawalUid) {
+      alert('UID is required for Exchange withdrawals.');
+      return;
+    }
+
+    setIsWithdrawing(true);
+    const userDocRef = doc(db, `users/${auth.currentUser.uid}`);
+    const withdrawalColRef = collection(db, `users/${auth.currentUser.uid}/withdrawals`);
+    const newWithdrawalDocRef = doc(withdrawalColRef);
+
+    try {
+      // Create Atomic Transaction (Write Batch)
+      const batch = writeBatch(db);
+      
+      // 1. Deduct Balance
+      batch.update(userDocRef, {
+        balance: increment(-amountNum),
+        updatedAt: serverTimestamp()
+      });
+
+      // 2. Create History Entry
+      batch.set(newWithdrawalDocRef, {
+        amount: amountNum,
+        method: withdrawalMethod,
+        address: withdrawalAddress || null,
+        uid: withdrawalUid || null,
+        status: 'Pending',
+        createdAt: serverTimestamp(),
+        userId: auth.currentUser.uid,
+        username: profile.username || 'Unknown',
+        telegramId: profile.telegramId || 0,
+        email: profile.email || auth.currentUser.email || 'No email'
+      });
+
+      // Commit Batch
+      await batch.commit();
+
+      setWithdrawalSuccess(true);
+      
+      try {
+        (window as any).Telegram?.WebApp?.showAlert('\ud83c\udf89 Withdrawal Request Submitted!');
+        (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+      } catch {}
+      
+      setWithdrawalAmount('');
+      setWithdrawalAddress('');
+      setWithdrawalUid('');
+
+      // Automated Transition after 6 hours
+      const delayMs = 6 * 60 * 60 * 1000;
+
+      setTimeout(async () => {
+        try {
+          const successBatch = writeBatch(db);
+          successBatch.update(newWithdrawalDocRef, { status: 'Success' });
+          successBatch.update(userDocRef, {
+            consumedInvites: increment(20),
+            has_withdrawn: true,
+            adsSinceLastWithdrawal: 0,
+            updatedAt: serverTimestamp()
+          });
+          await successBatch.commit();
+          
+          try {
+             (window as any).Telegram?.WebApp?.showAlert('\u2705 Withdrawal Processed Successfully!');
+             (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+          } catch {}
+        } catch (err) {
+          console.error("Delayed Withdrawal Update Error:", err);
+        }
+      }, delayMs);
+
+      // Auto hide success message banner after 5 seconds
+      setTimeout(() => setWithdrawalSuccess(false), 5000);
+    } catch (err) {
+      console.error("Withdrawal Error:", err);
+      handleFirestoreError(err, OperationType.WRITE, userDocRef.path);
+      try {
+        (window as any).Telegram?.WebApp?.showAlert('\u274c Withdrawal failed. Please try again.');
+        (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('error');
+      } catch {}
+    } finally {
+      setIsWithdrawing(false);
     }
   };
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#f8faff] flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#061B1B] p-10 text-center overflow-hidden">
+        <motion.div
+          animate={{ 
+            opacity: [1, 0.2, 1],
+          }}
+          transition={{ 
+            duration: 1.5, 
+            repeat: Infinity,
+            ease: "easeInOut"
+          }}
+          className="relative mb-12"
+        >
+          <div className="absolute inset-0 bg-[#10B981]/10 blur-[100px] rounded-full" />
+          <svg width="240" height="240" viewBox="0 0 240 240" className="relative drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+            <circle cx="90" cy="90" r="80" stroke="#10B981" strokeWidth="1" fill="none" opacity="0.6" />
+            <circle cx="150" cy="150" r="80" stroke="#10B981" strokeWidth="1" fill="none" opacity="0.6" />
+            <path d="M90 10 A 80 80 0 0 1 170 90 A 80 80 0 0 1 90 170 A 80 80 0 0 1 10 90 A 80 80 0 0 1 90 10" stroke="#10B981" strokeWidth="0.5" fill="none" opacity="0.2" />
+          </svg>
+        </motion.div>
+
+        <div className="space-y-4">
+          <motion.div
+            key={welcomeIndex}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.5 }}
+          >
+            <h2 className="text-2xl font-bold text-white tracking-tight uppercase">
+              {welcomeMessages[welcomeIndex]}
+            </h2>
+          </motion.div>
+          
+          <div className="flex items-center justify-center gap-2">
+            {[0, 1, 2, 3].map((i) => (
+              <motion.div
+                key={i}
+                animate={{
+                  scale: welcomeIndex === i ? [1, 1.2, 1] : 1,
+                  opacity: welcomeIndex === i ? 1 : 0.3
+                }}
+                className={`w-1.5 h-1.5 rounded-full bg-[#10B981]`}
+              />
+            ))}
+          </div>
+        </div>
+
+        <motion.p 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 0.4 }}
+          transition={{ delay: 0.5 }}
+          className="text-[10px] text-white font-medium mt-12 uppercase tracking-[0.3em]"
+        >
+          Securing Connection...
+        </motion.p>
+      </div>
+    );
+  }
+
+  if (error === "AUTH_RESTRICTED") {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#0D0D0D] p-8 text-center">
+        <div className="w-20 h-20 rounded-full bg-[#EF4444]/10 flex items-center justify-center mb-6">
+          <Zap className="w-10 h-10 text-[#EF4444]" />
+        </div>
+        <h2 className="text-2xl font-black text-white mb-4">Auth Disabled</h2>
+        <div className="text-[#A0AEC0] text-sm mb-10 leading-relaxed text-left space-y-4">
+          <p>This app requires **Anonymous Authentication** to be enabled in your Firebase Project.</p>
+          <ol className="list-decimal list-inside space-y-2 font-bold text-white/80">
+            <li>Open your Firebase Console</li>
+            <li>Go to "Authentication"</li>
+            <li>Click the "Sign-in method" tab</li>
+            <li>Enable "Anonymous" provider</li>
+          </ol>
+        </div>
+        <button 
+          onClick={() => window.location.reload()}
+          className="w-full h-16 rounded-2xl bg-white text-black font-black shadow-xl"
+        >
+          I'VE ENABLED IT, RETRY
+        </button>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#061B1B] p-8 text-center">
+        <div className="w-20 h-20 rounded-full bg-[#10B981]/10 flex items-center justify-center mb-6">
+          <Bell className="w-10 h-10 text-[#10B981]" />
+        </div>
+        <h2 className="text-2xl font-black text-white mb-4">Connection Failed</h2>
+        <p className="text-[#10B981] text-sm mb-10 leading-relaxed bg-[#10B981]/5 p-4 rounded-xl border border-[#10B981]/10">
+          {error}
+        </p>
+        <button 
+          onClick={() => window.location.reload()}
+          className="w-full h-16 rounded-2xl bg-white text-black font-black shadow-xl"
+        >
+          RETRY CONNECTION
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#f8faff] text-slate-900 font-sans flex flex-col items-center justify-center p-4">
-      {/* User Info Header */}
-      <motion.div 
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center gap-3 mb-8 bg-white px-6 py-3 rounded-2xl shadow-sm border border-indigo-50"
-      >
-        <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center text-indigo-600">
-          <User size={20} />
-        </div>
+    <div className="min-h-screen pb-28 bg-[#061B1B] font-sans selection:bg-[#10B981]/30 overflow-x-hidden">
+      {/* Header Section */}
+      <header className="px-6 pt-6 pb-4 flex items-center justify-between">
         <div>
-          <p className="text-xs text-slate-400 font-medium uppercase tracking-wider leading-none mb-1">Welcome back</p>
-          <p className="text-sm font-bold text-slate-800">{username}</p>
+          <h1 className="text-xl font-bold text-white tracking-tight">
+            Leaderboard
+          </h1>
+          <p className="text-sm text-[#A0AEC0] mt-0.5">
+            Overall top 20 active champions
+          </p>
         </div>
-      </motion.div>
-
-      {/* Main Earn Box */}
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="w-full max-w-sm bg-white rounded-[2.5rem] p-10 shadow-[0_20px_50px_rgba(79,70,229,0.08)] border border-indigo-50 relative overflow-hidden"
-      >
-        <div className="relative z-10 flex flex-col items-center text-center">
-          <div className="w-20 h-20 bg-indigo-600 rounded-[1.8rem] flex items-center justify-center text-white shadow-xl shadow-indigo-200 mb-8 rotate-3">
-            <DollarSign size={36} />
+        <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-[#10B981] to-[#059669] flex items-center justify-center border border-white/10 shadow-lg shadow-[#10B981]/10 p-0.5">
+          <div className="w-full h-full rounded-full bg-[#061B1B] flex items-center justify-center">
+             <Trophy className="w-4 h-4 text-white" />
           </div>
-
-          <h2 className="text-5xl font-black text-slate-900 mb-2 leading-none">
-            ${balance ?? 0}
-          </h2>
-          <p className="text-slate-400 font-medium mb-6">Current Balance</p>
-
-          <AnimatePresence>
-            {error && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="w-full bg-red-50 text-red-600 text-xs font-bold p-3 rounded-xl mb-6 border border-red-100"
-              >
-                {error}
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <div className="grid grid-cols-2 gap-4 w-full mb-10">
-            <div className="bg-slate-50 rounded-2xl p-4 flex flex-col items-center border border-slate-100">
-              <Eye size={20} className="text-indigo-400 mb-2" />
-              <div className="text-lg font-bold leading-none">{adsWatched ?? 0}</div>
-              <div className="text-[10px] text-slate-400 uppercase font-bold tracking-widest mt-1">Ads Watched</div>
-            </div>
-            <div className="bg-slate-50 rounded-2xl p-4 flex flex-col items-center border border-slate-100">
-              <Wallet size={20} className="text-emerald-400 mb-2" />
-              <div className="text-lg font-bold leading-none">$1.00</div>
-              <div className="text-[10px] text-slate-400 uppercase font-bold tracking-widest mt-1">Reward/Ad</div>
-            </div>
-          </div>
-
-          <motion.button
-            whileHover={!isWatching ? { scale: 1.05 } : {}}
-            whileTap={!isWatching ? { scale: 0.95 } : {}}
-            onClick={startAd}
-            disabled={isWatching}
-            className={cn(
-              "w-full py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-3 transition-all",
-              isWatching 
-                ? "bg-slate-100 text-slate-400 cursor-not-allowed" 
-                : "bg-indigo-600 text-white shadow-[0_10px_30px_rgba(79,70,229,0.3)] hover:bg-indigo-700"
-            )}
-            id="watch-ads-btn"
-          >
-            {isWatching ? (
-              <>
-                <Loader2 className="w-6 h-6 animate-spin" />
-                <span>PLaying ({countdown}s)</span>
-              </>
-            ) : (
-              <>
-                <Play size={20} fill="currentColor" />
-                <span>WATCH ADS NOW</span>
-              </>
-            )}
-          </motion.button>
         </div>
+      </header>
 
-        {/* Decorative Elements */}
-        <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-full blur-3xl -mr-10 -mt-10 opacity-60" />
-        <div className="absolute bottom-0 left-0 w-32 h-32 bg-emerald-50 rounded-full blur-3xl -ml-10 -mb-10 opacity-40" />
-      </motion.div>
-
-      {/* Simple Footer */}
-      <p className="mt-8 text-slate-300 text-xs font-bold tracking-widest uppercase">
-        Verified AdEarn Network
-      </p>
-
-      {/* Ad Overlay (Simulated fallback) */}
-      <AnimatePresence>
-        {isWatching && !window.telegaAds && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/95 backdrop-blur-md"
-          >
+      <main className="px-6 space-y-6">
+        {activeTab === 'home' ? (
+          <>
+            {/* Main Balance Card */}
             <motion.div 
-              initial={{ scale: 0.9 }}
-              animate={{ scale: 1 }}
-              className="w-full max-w-lg aspect-square bg-white rounded-[3rem] p-12 flex flex-col items-center justify-center text-center relative overflow-hidden shadow-2xl"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="gradient-card rounded-[24px] p-6 text-white shadow-xl shadow-[#10B981]/10"
             >
-              <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/5 to-emerald-500/5" />
-              
-              <motion.div 
-                animate={{ scale: [1, 1.1, 1] }} 
-                transition={{ duration: 2, repeat: Infinity }}
-                className="w-24 h-24 bg-indigo-50 rounded-[2rem] flex items-center justify-center text-indigo-600 mb-8"
-              >
-                <Sparkles size={40} />
-              </motion.div>
-              
-              <h3 className="text-3xl font-black text-slate-900 mb-4">Amazing Product</h3>
-              <p className="text-slate-400 font-medium max-w-[200px] mb-8">This is where your sponsored content would be displayed.</p>
-
-              <div className="relative w-full h-1 bg-slate-100 rounded-full overflow-hidden mb-2">
-                <motion.div 
-                  initial={{ width: "0%" }}
-                  animate={{ width: "100%" }}
-                  transition={{ duration: 5, ease: "linear" }}
-                  className="h-full bg-indigo-600"
-                />
-              </div>
-              <div className="text-indigo-600 font-black text-sm tracking-widest">
-                {countdown} SECONDS REMAINING
+              <div className="relative z-10">
+                <p className="text-sm font-medium opacity-80 uppercase tracking-widest">Current Balance</p>
+                <h2 className="text-4xl font-extrabold mt-1 tracking-tight">
+                  {Math.floor(profile?.balance || 0)} pts
+                  <span className="text-lg opacity-40 ml-3 font-medium">~${((profile?.balance || 0) * POINT_TO_USD).toFixed(2)}</span>
+                </h2>
+                
+                <div className="mt-8 grid grid-cols-3 gap-4 border-t border-white/20 pt-6">
+                  <div className="text-center">
+                    <p className="text-[10px] uppercase font-bold opacity-60 tracking-wider">Total Friends</p>
+                    <p className="text-sm font-bold mt-1">{profile?.total_invites || 0}</p>
+                  </div>
+                  <div className="text-center border-x border-white/10 px-2">
+                    <p className="text-[10px] uppercase font-bold opacity-60 tracking-wider">Ads Watched</p>
+                    <p className="text-sm font-bold mt-1">{profile?.adsWatched || 0}</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-[10px] uppercase font-bold opacity-60 tracking-wider">Tasks Done</p>
+                    <p className="text-sm font-bold mt-1">{(profile?.tasksCompleted.length || 0) + (profile?.microTasksCompleted || 0)}</p>
+                  </div>
+                </div>
               </div>
             </motion.div>
-          </motion.div>
+
+            {/* Action Button */}
+            {(() => {
+              const lastReset = profile?.lastHourlyAdReset ? profile.lastHourlyAdReset.toMillis() : (now - 1000000); 
+              const isNewPeriod = now - lastReset >= 900000;
+              const adsCount = isNewPeriod ? 0 : (profile?.adsWatchedThisHour || 0);
+              const isLocked = adsCount >= 15 && !isNewPeriod;
+
+              const getCooldown = () => {
+                const diff = 900000 - (now - lastReset);
+                if (diff <= 0) return null;
+                const mins = Math.floor(diff / (1000 * 60));
+                const secs = Math.floor((diff % (1000 * 60)) / 1000);
+                return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+              };
+
+              return (
+                <motion.button 
+                  whileTap={{ scale: isLocked ? 1 : 0.98 }}
+                  onClick={handleWatchAd}
+                  disabled={isWatching || isLocked}
+                  className={`w-full h-14 rounded-2xl flex items-center justify-center gap-3 text-white font-bold shadow-lg transition-all
+                    ${isLocked 
+                      ? 'bg-white/5 border border-white/5 text-white/20 shadow-none' 
+                      : 'bg-gradient-to-r from-[#10B981] to-[#059669] shadow-[#10B981]/20 disabled:opacity-70 disabled:cursor-not-allowed group'
+                    }`}
+                >
+                  {isWatching ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : isLocked ? (
+                    <Clock size={16} />
+                  ) : (
+                    <Play className="w-5 h-5 fill-current" />
+                  )}
+                  <span className="text-lg">
+                    {isWatching ? 'Watching...' : isLocked ? `Limit reached. Next set in ${getCooldown()}` : 'Watch Video Ad'}
+                  </span>
+                </motion.button>
+              );
+            })()}
+
+            {/* Daily Rewards Sneak Peek */}
+            <section className="stats-card rounded-2xl p-4 flex items-center gap-4 cursor-pointer" onClick={() => setActiveTab('tasks')}>
+              <div className="w-12 h-12 rounded-xl bg-[#10B981]/10 flex items-center justify-center">
+                <Zap className="w-6 h-6 text-[#10B981]" />
+              </div>
+              <div className="flex-1">
+                <h4 className="font-bold text-sm">Daily Reward</h4>
+                <p className="text-xs text-[#A0AEC0]">Current Streak: {profile?.dailyStreak || 0} Days</p>
+              </div>
+              <div className="px-3 py-1 rounded-full bg-[#10B981]/10 text-[#10B981] text-[10px] font-bold border border-[#10B981]/20 uppercase">
+                 View Tasks
+              </div>
+            </section>
+          </>
+        ) : activeTab === 'tasks' ? (
+          <div className="space-y-6">
+            {/* Daily Check-in Category */}
+            <div>
+              <h2 className="text-lg font-bold text-white mb-3 flex items-center gap-2 px-1">
+                <Clock className="w-5 h-5 text-[#10B981]" />
+                Daily Check-in
+              </h2>
+              <section className="stats-card rounded-3xl p-6 bg-gradient-to-b from-white/[0.05] to-transparent">
+                <div className="flex items-center justify-between mb-6">
+                    <div>
+                      <h3 className="font-bold text-base">Daily Reward</h3>
+                      <p className="text-xs text-[#A0AEC0]">Claim your daily reward</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs font-bold text-[#10B981]">{profile?.dailyStreak}/7 Days</p>
+                      <div className="w-20 h-1.5 bg-white/10 rounded-full mt-1 overflow-hidden">
+                        <div 
+                          className="h-full bg-[#10B981]" 
+                          style={{ width: `${((profile?.dailyStreak || 0) / 7) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-7 gap-2 mb-6">
+                  {DAILY_REWARDS.map((reward, i) => {
+                    const day = i + 1;
+                    const isCompleted = profile && day <= profile.dailyStreak;
+                    const isCurrent = profile && day === ((profile.dailyStreak % 7) + 1);
+                    
+                    return (
+                      <div key={i} className="flex flex-col items-center gap-1">
+                        <div className={`w-full aspect-square rounded-xl flex items-center justify-center border ${
+                          isCompleted ? 'bg-[#10B981] border-[#10B981] text-white' : 
+                          isCurrent ? 'bg-[#10B981]/20 border-[#10B981] text-[#10B981]' : 
+                          'bg-white/5 border-white/10 text-white/40'
+                        }`}>
+                          {isCompleted ? <Check className="w-4 h-4" /> : <span className="text-[10px] font-bold">{reward}</span>}
+                        </div>
+                        <span className="text-[8px] uppercase font-bold opacity-40">Day {day}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <motion.button 
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleDailyCheckIn}
+                  disabled={isClaimingDaily || (profile && profile.lastDailyClaim && (Date.now() - profile.lastDailyClaim.toMillis()) < 24 * 60 * 60 * 1000)}
+                  className="w-full py-3 rounded-xl bg-[#10B981] text-white font-bold text-sm disabled:opacity-50"
+                >
+                  {isClaimingDaily ? 'Claiming...' : 'Collect Reward'}
+                </motion.button>
+              </section>
+            </div>
+
+            {/* Available Tasks Category */}
+            <div>
+              <h2 className="text-lg font-bold text-white mb-3 flex items-center gap-2 px-1">
+                <CheckCircle2 className="w-5 h-5 text-[#10B981]" />
+                Available Tasks
+              </h2>
+              <div className="space-y-3">
+                <section className="stats-card rounded-2xl p-4 flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center">
+                    <Users className="w-6 h-6 text-blue-500" />
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="font-bold text-sm">Join Telegram Channel</h4>
+                    <p className="text-xs text-[#A0AEC0]">Reward: 10 points | Verify after join</p>
+                  </div>
+                  {!profile?.tasksCompleted.includes('tg_join') ? (
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={() => {
+                          const link = 'https://t.me/tasktuner';
+                          try {
+                            (window as any).Telegram?.WebApp?.openTelegramLink(link);
+                          } catch {
+                            window.open(link, '_blank');
+                          }
+                          setHasClickedJoin(true);
+                        }}
+                        className="px-4 py-2 rounded-lg bg-white/5 text-white text-xs font-bold border border-white/10"
+                      >
+                        Join
+                      </button>
+                      {hasClickedJoin && (
+                        <button 
+                          onClick={handleJoinTelegram}
+                          disabled={isVerifyingTask}
+                          className="px-4 py-2 rounded-lg bg-[#10B981] text-white text-xs font-bold"
+                        >
+                          {isVerifyingTask ? '...' : 'Verify'}
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-[#10B981]/20 flex items-center justify-center">
+                      <Check className="w-4 h-4 text-[#10B981]" />
+                    </div>
+                  )}
+                </section>
+              </div>
+            </div>
+
+            {/* Micro Tasks Category */}
+            <div>
+              <h2 className="text-lg font-bold text-white mb-3 flex items-center gap-2 px-1">
+                <Zap className="w-5 h-5 text-[#10B981]" />
+                Micro Tasks
+              </h2>
+              <div className="grid grid-cols-1 gap-3">
+                {[1, 2, 3, 4, 5].map(id => {
+                  const timeLeft = microTasksTimers[id] || 0;
+                  const stats = profile?.microTaskStats?.[String(id)] || { count: 0, cooldownUntil: 0, periodStart: 0 };
+                  
+                  // Handle period reset logic in UI
+                  const periodDuration = 12 * 60 * 60 * 1000;
+                  const isPeriodOver = stats.periodStart > 0 && now - stats.periodStart >= periodDuration;
+                  
+                  const effectiveCount = isPeriodOver ? 0 : stats.count;
+                  const effectiveCooldownUntil = isPeriodOver ? 0 : stats.cooldownUntil;
+                  const isLocked = effectiveCooldownUntil > now;
+                  
+                  const getCooldownTimeLeft = () => {
+                    const diff = effectiveCooldownUntil - now;
+                    if (diff <= 0) return null;
+                    const hours = Math.floor(diff / (1000 * 60 * 60));
+                    const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                    const secs = Math.floor((diff % (1000 * 60)) / 1000);
+                    return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                  };
+
+                  return (
+                    <section key={id} className={`stats-card rounded-2xl p-4 flex items-center justify-between gap-4 ${isLocked ? 'opacity-60 grayscale' : ''}`}>
+                      <div className="flex items-center gap-4">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold ${isLocked ? 'bg-red-500/10 text-red-500' : 'bg-[#10B981]/10 text-[#10B981]'}`}>
+                          {isLocked ? <Clock size={16} /> : id}
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-sm">Micro Task {id}</h4>
+                          <p className="text-[10px] text-[#A0AEC0]">
+                            {isLocked ? 'Unlocked in 12h' : `Watch ad & wait 30s to claim 3 pts (${effectiveCount}/15)`}
+                          </p>
+                        </div>
+                      </div>
+                      
+                      {isLocked ? (
+                        <div className="text-[10px] font-bold text-red-500 bg-red-500/10 px-3 py-1.5 rounded-lg border border-red-500/20 font-mono min-w-[80px] text-center">
+                          {getCooldownTimeLeft()}
+                        </div>
+                      ) : timeLeft > 0 ? (
+                        <div className="px-4 py-2 rounded-lg bg-black/40 text-[#10B981] text-xs font-black border border-[#10B981]/30 min-w-[80px] text-center">
+                          {timeLeft}s
+                        </div>
+                      ) : (
+                        <button 
+                          onClick={() => handleMicroTaskVisit(id)}
+                          className="px-4 py-2 rounded-lg bg-white text-black text-xs font-bold min-w-[80px]"
+                        >
+                          Start
+                        </button>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'leaderboard' ? (
+          <div className="space-y-6 pb-15 animate-fade-in">
+            {/* Trophy spotlight card */}
+            <div className="stats-card rounded-3xl p-6 bg-gradient-to-br from-[#10B981]/10 to-transparent border border-white/10 relative overflow-hidden flex flex-col items-center text-center">
+              <motion.div 
+                animate={{ scale: [1, 1.05, 1], rotate: [0, 2, -2, 0] }}
+                transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}
+                className="w-16 h-16 rounded-2xl bg-[#10B981]/10 flex items-center justify-center mb-4 border border-[#10B981]/20 shadow-lg shadow-[#10B981]/10"
+              >
+                <Trophy className="w-8 h-8 text-[#10B981]" />
+              </motion.div>
+              <h2 className="text-xl font-bold text-white uppercase tracking-tight">Earning Champions</h2>
+              <p className="text-xs text-[#A0AEC0] max-w-xs mt-1">
+                The absolute finest earners in Task Tuner. Compete with others and claim your spot at the top!
+              </p>
+              
+              {/* Force refresh button */}
+              <button 
+                onClick={() => fetchLeaderboard(leaderboardCategory, true)}
+                disabled={loadingLeaderboard}
+                className="mt-4 px-4 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-bold uppercase tracking-wider flex items-center gap-2 text-[#10B981] transition-colors"
+              >
+                {loadingLeaderboard ? <Loader2 className="w-3 h-3 animate-spin" /> : "Refresh Scores"}
+              </button>
+            </div>
+
+            {/* Category tabs switcher */}
+            <div className="grid grid-cols-3 gap-2 bg-black/20 p-1.5 rounded-2xl border border-white/5">
+              {[
+                { id: 'invites', label: '👥 Invites', keyAttr: 'total_invites' },
+                { id: 'ads', label: '📺 Ads', keyAttr: 'adsWatched' },
+                { id: 'microtasks', label: '⚡ Tasks', keyAttr: 'microTasksCompleted' }
+              ].map(cat => (
+                <button
+                  key={cat.id}
+                  onClick={() => setLeaderboardCategory(cat.id as any)}
+                  className={`py-3 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all duration-300 ${
+                    leaderboardCategory === cat.id 
+                      ? 'bg-[#10B981] text-white shadow-lg shadow-[#10B981]/20 font-extrabold' 
+                      : 'text-[#A0AEC0] hover:text-white'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Leaderboard content */}
+            {loadingLeaderboard ? (
+              <div className="flex flex-col items-center justify-center py-20 gap-3">
+                <Loader2 className="w-8 h-8 text-[#10B981] animate-spin" />
+                <p className="text-[10px] text-[#A0AEC0] uppercase tracking-widest">Retrieving standings...</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {leaderboardUsers[leaderboardCategory].length === 0 ? (
+                  <div className="stats-card rounded-3xl p-10 text-center border border-white/5">
+                    <p className="text-[#A0AEC0] text-sm opacity-60">No scores recorded for this category yet.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {leaderboardUsers[leaderboardCategory].map((user, idx) => {
+                      const rank = idx + 1;
+                      const isCurrentUser = user.telegramId === profile?.telegramId;
+                      
+                      let rankBadge = `${rank}`;
+                      let rankStyle = "text-white/60 font-mono text-xs font-bold";
+                      let bgStyle = "bg-white/5 border border-white/5";
+                      
+                      if (rank === 1) {
+                        rankBadge = "🥇";
+                        rankStyle = "text-xl";
+                        bgStyle = "bg-[#10B981]/15 border border-[#10B981]/30 shadow-md shadow-[#10B981]/5";
+                      } else if (rank === 2) {
+                        rankBadge = "🥈";
+                        rankStyle = "text-xl";
+                        bgStyle = "bg-[#10B981]/10 border border-white/10";
+                      } else if (rank === 3) {
+                        rankBadge = "🥉";
+                        rankStyle = "text-xl";
+                        bgStyle = "bg-[#10B981]/5 border border-white/5";
+                      }
+
+                      if (isCurrentUser) {
+                        bgStyle = "bg-[#10B981]/20 border border-[#10B981] shadow-[0_0_15px_rgba(16,185,129,0.15)]";
+                      }
+
+                      const renderMetricText = () => {
+                        if (leaderboardCategory === 'invites') {
+                          return `${user.total_invites} ${user.total_invites === 1 ? 'invite' : 'invites'}`;
+                        } else if (leaderboardCategory === 'ads') {
+                          return `${user.adsWatched} ${user.adsWatched === 1 ? 'ad' : 'ads'}`;
+                        } else {
+                          return `${user.microTasksCompleted} ${user.microTasksCompleted === 1 ? 'task' : 'tasks'}`;
+                        }
+                      };
+
+                      return (
+                        <div key={user.id} className={`p-4 rounded-2xl flex items-center justify-between transition-all duration-300 ${bgStyle}`}>
+                          <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-black/20 flex items-center justify-center font-bold shrink-0">
+                              <span className={rankStyle}>{rankBadge}</span>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-sm font-black text-white truncate max-w-[120px] sm:max-w-[180px]">{user.username}</span>
+                                {isCurrentUser && (
+                                  <span className="px-1.5 py-0.5 rounded bg-[#10B981] text-black text-[8px] font-black uppercase shrink-0">YOU</span>
+                                )}
+                              </div>
+                              <span className="text-[10px] font-bold text-[#A0AEC0] uppercase tracking-wide">
+                                {user.balance} PTS
+                              </span>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="text-xs font-mono font-black text-[#10B981] uppercase bg-[#10B981]/10 px-2.5 py-1.5 rounded-xl border border-[#10B981]/20">
+                              {renderMetricText()}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Standing prompt for user if they aren't in the top 20 list */}
+                {(() => {
+                  const isInTop20 = leaderboardUsers[leaderboardCategory].some(u => u.telegramId === profile?.telegramId);
+                  if (isInTop20) return null;
+                  
+                  const renderUserStats = () => {
+                    if (leaderboardCategory === 'invites') {
+                      const invites = (profile?.total_invites || 0);
+                      return `${invites} ${invites === 1 ? 'invite' : 'invites'}`;
+                    } else if (leaderboardCategory === 'ads') {
+                      const ads = (profile?.adsWatched || 0);
+                      return `${ads} ${ads === 1 ? 'ad' : 'ads'}`;
+                    } else {
+                      const tasks = (profile?.microTasksCompleted || 0);
+                      return `${tasks} ${tasks === 1 ? 'task' : 'tasks'}`;
+                    }
+                  };
+
+                  return (
+                    <div className="mt-6 p-5 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-between gap-4">
+                      <div>
+                        <h4 className="text-xs font-black text-[#10B981] uppercase tracking-widest flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
+                          Your Standing
+                        </h4>
+                        <p className="text-[10px] text-[#A0AEC0] mt-1 leading-relaxed">
+                          You are currently not in the top 20. Boost your activity to conquer the leaderboard!
+                        </p>
+                      </div>
+                      <div className="text-right flex flex-col items-end shrink-0">
+                        <span className="text-[10px] font-black uppercase text-[#A0AEC0] tracking-wider mb-1">Your Total</span>
+                        <span className="text-xs font-mono font-black text-white bg-white/10 border border-white/10 px-3 py-1.5 rounded-xl">
+                          {renderUserStats()}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        ) : activeTab === 'wallet' ? (
+          <div className="space-y-6 pb-10">
+            <h2 className="text-2xl font-black text-white px-2">Withdraw</h2>
+            
+            {/* Status Section */}
+            <div className="grid grid-cols-1 gap-3">
+              <div className="stats-card rounded-2xl p-4 border border-white/10">
+                <h3 className="text-[10px] font-black text-[#A0AEC0] uppercase tracking-[0.2em] mb-4 ml-1">Withdrawal Checklist</h3>
+                <div className="space-y-3">
+                  {[
+                    { label: 'Invite 20 Friends', current: (profile?.total_invites || 0) - (profile?.consumedInvites || 0), target: 20 },
+                    { label: 'Watch 25 Ads', current: profile?.adsSinceLastWithdrawal || 0, target: 25 },
+                    { label: 'Complete 30 Microtasks', current: profile?.microTasksCompleted || 0, target: 30 }
+                  ].map((req, i) => (
+                    <div key={i} className="flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/5">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-5 h-5 rounded-full flex items-center justify-center ${req.current >= req.target ? 'bg-green-500 text-white' : 'bg-white/10 text-white/40'}`}>
+                          {req.current >= req.target ? <Check size={12} /> : <span className="text-[10px] font-bold">{i+1}</span>}
+                        </div>
+                        <span className="text-xs font-bold text-white/80">{req.label}</span>
+                      </div>
+                      <span className={`text-xs font-black ${req.current >= req.target ? 'text-green-400' : 'text-red-400'}`}>
+                        {req.current}/{req.target}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Success Message Banner */}
+            {withdrawalSuccess && (
+               <motion.div 
+                 initial={{ opacity: 0, y: -20 }}
+                 animate={{ opacity: 1, y: 0 }}
+                 className="p-4 bg-green-500/20 border border-green-500/30 rounded-2xl text-center"
+               >
+                 <p className="text-green-400 text-xs font-black uppercase tracking-widest">\ud83c\udf89 Withdrawal Request Submitted!</p>
+               </motion.div>
+            )}
+
+            {/* Selection Menu */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between px-1">
+                <label className="text-[10px] font-black text-[#A0AEC0] uppercase tracking-[0.2em]">Method</label>
+                {withdrawalMethod && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[8px] font-bold text-white/40 uppercase">Selected:</span>
+                    <span className="text-[8px] font-black text-[#10B981] uppercase">{withdrawalMethod.replace('_', ' ')}</span>
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'usdt_trc20', label: 'USDT (TRC20)', img: 'https://cryptologos.cc/logos/tether-usdt-logo.png' },
+                  { id: 'usdt_bep20', label: 'USDT (BEP20)', img: 'https://cryptologos.cc/logos/tether-usdt-logo.png' },
+                  { id: 'ton', label: 'TON', img: 'https://cryptologos.cc/logos/toncoin-ton-logo.png' },
+                  { id: 'binance', label: 'Binance', img: 'https://upload.wikimedia.org/wikipedia/commons/e/e8/Binance_Logo.svg' },
+                ].map((m) => (
+                  <button 
+                    key={m.id}
+                    onClick={() => setWithdrawalMethod(m.id)}
+                    className={`p-3 rounded-xl border flex flex-col items-center gap-2 transition-all ${withdrawalMethod === m.id ? 'bg-[#10B981]/10 border-[#10B981] shadow-[0_0_15px_rgba(16,185,129,0.2)]' : 'bg-white/5 border-white/5'}`}
+                  >
+                    <img src={m.img} alt={m.label} className="w-6 h-6 object-contain" referrerPolicy="no-referrer" />
+                    <span className="text-[8px] font-black uppercase text-center leading-tight whitespace-pre-wrap">{m.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Input Form */}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-[#A0AEC0] uppercase tracking-[0.2em] ml-1">Amount (Min. 1667 pts)</label>
+                <div className="relative">
+                  <input 
+                    type="number"
+                    value={withdrawalAmount}
+                    onChange={(e) => setWithdrawalAmount(e.target.value)}
+                    placeholder="E.g. 2000"
+                    className="w-full h-14 bg-white/5 border border-white/10 rounded-2xl px-5 text-sm text-white focus:outline-none focus:border-[#10B981]/50 transition-all"
+                  />
+                  <div className="absolute right-5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-[#A0AEC0]">PTS</div>
+                </div>
+              </div>
+
+              {!(withdrawalMethod === 'binance') ? (
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-[#A0AEC0] uppercase tracking-[0.2em] ml-1">Wallet Address / Network</label>
+                  <input 
+                    type="text"
+                    value={withdrawalAddress}
+                    onChange={(e) => setWithdrawalAddress(e.target.value)}
+                    placeholder="Enter your wallet address"
+                    className="w-full h-14 bg-white/5 border border-white/10 rounded-2xl px-5 text-sm text-white focus:outline-none focus:border-[#10B981]/50 transition-all font-mono"
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-[#A0AEC0] uppercase tracking-[0.2em] ml-1">Exchange UID</label>
+                  <input 
+                    type="text"
+                    value={withdrawalUid}
+                    onChange={(e) => setWithdrawalUid(e.target.value)}
+                    placeholder="Enter your Exchange UID"
+                    className="w-full h-14 bg-white/5 border border-white/10 rounded-2xl px-5 text-sm text-white focus:outline-none focus:border-[#10B981]/50 transition-all font-mono"
+                  />
+                </div>
+              )}
+            </div>
+
+            <motion.button
+              whileTap={{ scale: 0.98 }}
+              onClick={handleWithdraw}
+              disabled={isWithdrawing || !profile || profile.balance < 1667}
+              className={`w-full h-16 rounded-2xl font-black text-white shadow-lg transition-all flex items-center justify-center gap-3
+                ${(((profile?.total_invites || 0) - (profile?.consumedInvites || 0)) >= 20 && (profile?.adsSinceLastWithdrawal || 0) >= 25 && (profile?.microTasksCompleted || 0) >= 30) 
+                  ? 'bg-gradient-to-r from-[#10B981] to-[#064E3B] shadow-[#10B981]/20' 
+                  : 'bg-white/10 border border-white/5 text-white/20'}`}
+            >
+              {isWithdrawing ? (
+                <div className="flex items-center gap-3">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>PROCESSING...</span>
+                </div>
+              ) : ((((profile?.total_invites || 0) - (profile?.consumedInvites || 0)) >= 20 && (profile?.adsSinceLastWithdrawal || 0) >= 25 && (profile?.microTasksCompleted || 0) >= 30) ? (
+                'WITHDRAW NOW'
+              ) : (
+                <>
+                  <Wallet size={20} />
+                  <span>LOCKED</span>
+                </>
+              ))}
+            </motion.button>
+
+            {/* History Section */}
+            <div className="mt-12 space-y-4">
+               <div className="flex items-center gap-2 px-2">
+                 <Clock size={16} className="text-[#10B981]" />
+                 <h3 className="text-lg font-black text-white uppercase tracking-tight">Withdrawal History</h3>
+               </div>
+
+               {withdrawalHistory.length === 0 ? (
+                 <div className="stats-card rounded-3xl p-10 text-center border border-white/5">
+                   <p className="text-[#A0AEC0] text-sm opacity-60">No withdrawal history yet.</p>
+                 </div>
+               ) : (
+                 <div className="space-y-3">
+                   {withdrawalHistory.map((item) => {
+                     const methodIcon = [
+                        { id: 'usdt_trc20', img: 'https://cryptologos.cc/logos/tether-usdt-logo.png' },
+                        { id: 'usdt_bep20', img: 'https://cryptologos.cc/logos/tether-usdt-logo.png' },
+                        { id: 'ton', img: 'https://cryptologos.cc/logos/toncoin-ton-logo.png' },
+                        { id: 'binance', img: 'https://upload.wikimedia.org/wikipedia/commons/e/e8/Binance_Logo.svg' },
+                     ].find(m => m.id === item.method)?.img;
+
+                     return (
+                       <div key={item.id} className="stats-card rounded-[24px] p-5 flex items-center justify-between border border-white/5">
+                          <div className="flex items-center gap-4">
+                             <div className="w-11 h-11 rounded-xl bg-white/5 flex items-center justify-center p-2.5">
+                               <img src={methodIcon} alt={item.method} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                             </div>
+                             <div>
+                               <p className="text-sm font-black text-white uppercase tracking-tight">{item.amount} pts ≈ { Math.floor(item.amount * POINT_TO_USD) }$</p>
+                               <p className="text-[9px] font-bold text-[#A0AEC0] uppercase opacity-60">
+                                 {item.createdAt?.toMillis ? new Date(item.createdAt.toMillis()).toLocaleDateString() : 'Processing...'}
+                               </p>
+                             </div>
+                          </div>
+                          <div className="text-right">
+                             {(() => {
+                               const isOlderThan6Hours = item.createdAt?.toMillis && (Date.now() - item.createdAt.toMillis()) > 6 * 60 * 60 * 1000;
+                               const status = (item.status === 'Pending' && isOlderThan6Hours) ? 'Success' : item.status;
+                               
+                               return (
+                                 <div className={`px-2.5 py-1 rounded-full text-[8px] font-black uppercase tracking-widest flex items-center gap-1.5
+                                   ${status === 'Pending' ? 'bg-yellow-500/10 text-yellow-500' : 
+                                     status === 'Success' ? 'bg-green-500/10 text-green-500' : 
+                                     'bg-red-500/10 text-red-500'}`}
+                                 >
+                                    <span className="w-1 h-1 rounded-full bg-current shadow-[0_0_5px_currentColor]" />
+                                    {status === 'Success' ? 'Success \u2705' : status}
+                                 </div>
+                               );
+                             })()}
+                          </div>
+                       </div>
+                     );
+                   })}
+                 </div>
+               )}
+            </div>
+          </div>
+
+        ) : activeTab === 'profile' ? (
+          <div className="space-y-6">
+            <h2 className="text-2xl font-black text-white px-2">Profile</h2>
+            <div className="bg-white/5 rounded-[32px] p-8 border border-white/10 relative overflow-hidden">
+              <div className="relative z-10">
+                <div className="flex items-center gap-6 mb-10">
+                  <div className="w-20 h-20 rounded-[24px] bg-gradient-to-tr from-[#10B981] to-[#064E3B] flex items-center justify-center text-3xl font-black text-white shadow-xl shadow-[#10B981]/20">
+                    {userData?.username?.[0]?.toUpperCase() || 'U'}
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-black text-white">{userData?.username || 'User'}</h3>
+                    <p className="text-xs text-[#10B981] font-bold mt-1 tracking-wider uppercase">Active Member</p>
+                  </div>
+                </div>
+                
+                  <div className="grid grid-cols-2 gap-3 mb-8">
+                  <div className="bg-black/30 p-4 rounded-2xl border border-white/5">
+                    <p className="text-[10px] font-black opacity-40 uppercase tracking-widest text-[#A0AEC0]">Balance</p>
+                    <p className="text-xl font-black text-white mt-1">{Math.floor(profile?.balance || 0)} pts</p>
+                    <p className="text-[10px] text-[#10B981] font-bold">${((profile?.balance || 0) * POINT_TO_USD).toFixed(2)}</p>
+                  </div>
+                  <div className="bg-black/30 p-4 rounded-2xl border border-white/5">
+                    <p className="text-[10px] font-black opacity-40 uppercase tracking-widest text-[#A0AEC0]">Tasks Done</p>
+                    <p className="text-xl font-black text-white mt-1">{(profile?.tasksCompleted.length || 0) + (profile?.microTasksCompleted || 0)}</p>
+                  </div>
+                  <div className="bg-black/30 p-4 rounded-2xl border border-white/5">
+                    <p className="text-[10px] font-black opacity-40 uppercase tracking-widest text-[#A0AEC0]">Invites</p>
+                    <p className="text-xl font-black text-white mt-1">{profile?.total_invites || 0}</p>
+                  </div>
+                  <div className="bg-black/30 p-4 rounded-2xl border border-white/5">
+                    <p className="text-[10px] font-black opacity-40 uppercase tracking-widest text-[#A0AEC0]">Total Ads</p>
+                    <p className="text-xl font-black text-white mt-1">{profile?.adsWatched || 0}</p>
+                  </div>
+                  <div className="bg-black/30 p-4 rounded-2xl border border-white/5 col-span-2">
+                    <p className="text-[10px] font-black opacity-40 uppercase tracking-widest text-[#A0AEC0]">Current Ads (Since last withdrawal)</p>
+                    <p className="text-xl font-black text-[#10B981] mt-1">{profile?.adsSinceLastWithdrawal || 0}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center p-5 bg-black/30 rounded-2xl border border-white/5">
+                    <span className="text-xs font-bold opacity-40 uppercase tracking-widest text-[#A0AEC0]">Invited By</span>
+                    <span className="text-sm font-bold text-[#10B981]">{profile?.invitedBy || 'Direct Join'}</span>
+                  </div>
+                  <div className="flex justify-between items-center p-5 bg-black/30 rounded-2xl border border-white/5">
+                    <span className="text-xs font-bold opacity-40 uppercase tracking-widest text-[#A0AEC0]">Telegram ID</span>
+                    <span className="text-sm font-mono text-white">{userData?.id}</span>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="absolute -right-20 -top-20 w-48 h-48 bg-[#10B981]/10 rounded-full blur-3xl" />
+            </div>
+
+            {/* FAQ Section */}
+            <div className="stats-card rounded-[32px] p-6 space-y-4">
+              <h4 className="text-lg font-black text-white uppercase tracking-tight flex items-center gap-2">
+                <Bell size={18} className="text-[#10B981]" />
+                Frequently Asked Questions
+              </h4>
+              
+              <div className="space-y-3">
+                <details className="group bg-white/5 rounded-2xl border border-white/5 overflow-hidden transition-all">
+                  <summary className="p-4 text-xs font-bold text-white/80 cursor-pointer list-none flex justify-between items-center hover:bg-white/5 transition-colors">
+                    How do I earn points?
+                    <Play size={10} className="rotate-90 group-open:rotate-270 transition-transform" />
+                  </summary>
+                  <div className="p-4 pt-0 text-[11px] text-[#A0AEC0] leading-relaxed">
+                    You earn points by watching short video ads (2 pts/ad) and completing daily tasks. You can also refer friends to earn a massive 50 pts per referral.
+                  </div>
+                </details>
+
+                <details className="group bg-white/5 rounded-2xl border border-white/5 overflow-hidden transition-all">
+                  <summary className="p-4 text-xs font-bold text-white/80 cursor-pointer list-none flex justify-between items-center hover:bg-white/5 transition-colors">
+                    What are the withdrawal limits?
+                    <Play size={10} className="rotate-90 group-open:rotate-270 transition-transform" />
+                  </summary>
+                  <div className="p-4 pt-0 text-[11px] text-[#A0AEC0] leading-relaxed">
+                    Minimum withdrawal is 1667 points ($10.00). withdrawal requires 25 ad views. You also need 20 invites for withdrawal.
+                  </div>
+                </details>
+
+                <details className="group bg-white/5 rounded-2xl border border-white/5 overflow-hidden transition-all">
+                  <summary className="p-4 text-xs font-bold text-white/80 cursor-pointer list-none flex justify-between items-center hover:bg-white/5 transition-colors">
+                    When do I receive my payment?
+                    <Play size={10} className="rotate-90 group-open:rotate-270 transition-transform" />
+                  </summary>
+                  <div className="p-4 pt-0 text-[11px] text-[#A0AEC0] leading-relaxed">
+                    Our system processes withdrawals within 6-24 hours.
+                  </div>
+                </details>
+              </div>
+
+              <motion.a 
+                whileTap={{ scale: 0.98 }}
+                href="http://t.me/TaskTunerSupportBot"
+                target="_blank"
+                rel="noreferrer"
+                className="w-full h-14 mt-4 rounded-2xl bg-white/5 border border-white/10 text-white font-bold flex items-center justify-center gap-3 hover:bg-white/10 transition-all"
+              >
+                <ExternalLink size={18} className="text-[#10B981]" />
+                NEED HELP? CONTACT US
+              </motion.a>
+            </div>
+            
+            <button 
+              onClick={() => (window as any).Telegram?.WebApp?.close()}
+              className="w-full h-16 rounded-2xl bg-white/5 border border-white/10 text-white font-black hover:bg-white/10 transition-colors"
+            >
+              EXIT MINI APP
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-6 text-center">
+            {/* Referral Stats Header */}
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="gradient-card rounded-[32px] p-8 text-white relative overflow-hidden"
+            >
+               <div className="relative z-10 flex flex-col items-center text-center">
+                  <div className="w-20 h-20 rounded-3xl bg-white/10 flex items-center justify-center mb-6 backdrop-blur-xl border border-white/20 shadow-2xl">
+                    <Gift className="w-10 h-10 text-white" />
+                  </div>
+                  <h2 className="text-3xl font-black mb-2 tracking-tight">Invite & Earn</h2>
+                  <p className="text-sm opacity-80 max-w-[240px] leading-relaxed mx-auto">
+                    Earn <span className="text-white font-bold">50 points</span> for every friend who starts earning with us
+                  </p>
+                  
+                  <div className="grid grid-cols-2 gap-4 w-full mt-10">
+                    <div className="bg-black/30 backdrop-blur-md rounded-2xl p-5 border border-white/5 shadow-inner">
+                      <p className="text-[10px] uppercase font-black opacity-40 tracking-[0.2em]">Referrals</p>
+                      <p className="text-3xl font-black mt-2 leading-none">{profile?.total_invites || 0}</p>
+                    </div>
+                    <div className="bg-black/30 backdrop-blur-md rounded-2xl p-5 border border-white/5 shadow-inner">
+                      <p className="text-[10px] uppercase font-black opacity-40 tracking-[0.2em]">Earnings</p>
+                      <p className="text-3xl font-black mt-2 text-[#10B981] leading-none">{Math.floor(profile?.referralEarnings || 0)} pts</p>
+                      <p className="text-[10px] font-bold text-white/40 mt-1">${((profile?.referralEarnings || 0) * POINT_TO_USD).toFixed(2)}</p>
+                    </div>
+                  </div>
+               </div>
+
+               {/* Modern Decorative Blurs */}
+               <div className="absolute -right-16 -top-16 w-48 h-48 bg-[#10B981]/30 rounded-full blur-[60px]" />
+               <div className="absolute -left-16 -bottom-16 w-48 h-48 bg-[#10B981]/30 rounded-full blur-[60px]" />
+            </motion.div>
+
+            {/* Invite Actions Section */}
+            <div className="space-y-8 pb-10">
+              {/* Copy Link Component */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between px-1">
+                  <label className="text-[10px] font-black text-[#A0AEC0] uppercase tracking-[0.15em]">Your Unique Link</label>
+                  <span className="text-[10px] text-[#10B981] font-bold">Earn 50 points per friend!</span>
+                </div>
+                <div className="relative group">
+                  <input 
+                    readOnly 
+                    value={referralLink}
+                    className="w-full h-16 bg-white/5 border border-white/10 rounded-2xl px-6 text-xs text-white pr-16 focus:outline-none focus:border-[#10B981]/50 transition-all font-mono"
+                  />
+                  <button 
+                    onClick={handleCopyLink}
+                    className="absolute right-2.5 top-2.5 bottom-2.5 w-11 bg-[#10B981] rounded-xl flex items-center justify-center text-white active:scale-95 transition-all shadow-lg shadow-[#10B981]/20 hover:bg-[#059669]"
+                  >
+                    <Copy size={18} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Share Strategy Buttons */}
+              <div className="grid grid-cols-1 gap-3 text-center">
+                <motion.button
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleShare}
+                  className="w-full h-16 rounded-2xl bg-white text-black font-black flex items-center justify-center gap-4 shadow-[0_10px_30px_rgba(255,255,255,0.1)] hover:bg-[#F3F4F6] transition-colors"
+                >
+                  <Share2 size={24} />
+                  <span>SEND TO FRIENDS</span>
+                </motion.button>
+              </div>
+
+              {/* Trust/Tutorial Cards */}
+              <div className="grid grid-cols-1 gap-4 text-left">
+                <div className="stats-card rounded-[24px] p-6 border border-white/5 flex gap-4 items-start">
+                   <div className="w-10 h-10 rounded-full bg-[#10B981]/10 flex items-center justify-center shrink-0">
+                     <CheckCircle2 size={20} className="text-[#10B981]" />
+                   </div>
+                   <div>
+                     <h5 className="font-bold text-sm mb-1 text-white">Verified Tracking</h5>
+                     <p className="text-xs text-[#A0AEC0] leading-relaxed">
+                       Our system verifies every referral instantly, beware multiple(POLYGAMY). You get paid 50 points the moment they open the app.
+                     </p>
+                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
-      </AnimatePresence>
+      </main>
+
+      {/* Navigation Bar */}
+      <nav className="fixed bottom-0 left-0 right-0 py-4 pb-8 px-2 sm:px-6 nav-blur z-50">
+        <div className="max-w-md mx-auto flex items-center justify-center">
+          <NavItem icon={<Trophy />} label="Leaderboard" active={true} onClick={() => {}} />
+        </div>
+      </nav>
     </div>
+  );
+}
+
+function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode, label: string, active: boolean, onClick: () => void }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={`flex flex-col items-center gap-1 transition-all group relative ${active ? 'text-[#10B981]' : 'text-[#A0AEC0]'}`}
+    >
+      <div className={`p-2 rounded-xl transition-all ${active ? 'bg-[#10B981]/10 scale-105 shadow-lg shadow-[#10B981]/10' : 'group-hover:bg-white/5'}`}>
+        {React.cloneElement(icon as React.ReactElement, { size: 21, strokeWidth: active ? 2.5 : 2 })}
+      </div>
+      <span className={`text-[9px] font-bold uppercase tracking-wider ${active ? 'opacity-100' : 'opacity-40'}`}>
+        {label}
+      </span>
+      {active && (
+        <motion.div 
+          layoutId="nav-pill"
+          className="w-1.5 h-1.5 rounded-full bg-[#10B981] absolute -bottom-1"
+        />
+      )}
+    </button>
   );
 }
