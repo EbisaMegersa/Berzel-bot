@@ -15,9 +15,6 @@ service cloud.firestore {
     function incoming() { return request.resource.data; }
     function existing() { return resource.data; }
     function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
-    function isAdmin() {
-      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.telegramId == 2022805638;
-    }
 
     // Validation Blueprint
     function isValidUser(data) {
@@ -50,14 +47,14 @@ service cloud.firestore {
       
       allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming());
       
-      allow update: if (isOwner(userId) && isValidId(userId) && (
+      allow update: if isOwner(userId) && isValidId(userId) && (
         // Action: Owner self-update
         incoming().get('updatedAt', request.time) == request.time &&
         (
           isValidUser(incoming()) || 
           incoming().diff(existing()).affectedKeys().hasAny(['consumedInvites', 'updatedAt', 'has_withdrawn', 'adsSinceLastWithdrawal', 'balance', 'dailyStreak', 'lastDailyClaim', 'tasksCompleted', 'adsWatched', 'referralsCount', 'total_invites', 'referralEarnings', 'adsWatchedThisHour', 'lastHourlyAdReset', 'microTasksCompleted', 'microTaskStats'])
         )
-      )) || (
+      ) || (
         // Action: Referral Reward (50 points from another user)
         isSignedIn() && !isOwner(userId)
         && incoming().balance == existing().balance + 50
@@ -66,7 +63,7 @@ service cloud.firestore {
         && (incoming().get('referralEarnings', 0) == (existing().get('referralEarnings', 0) + 50))
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'referralsCount', 'total_invites', 'referralEarnings', 'updatedAt'])
-      ) || isAdmin();
+      );
 
       match /referrals/{refId} {
         allow read: if isOwner(userId);
@@ -74,9 +71,9 @@ service cloud.firestore {
       }
 
       match /withdrawals/{withdrawalId} {
-        allow read: if isOwner(userId) || isAdmin();
+        allow read: if isOwner(userId);
         allow create: if isOwner(userId) && isValidId(withdrawalId) && isValidWithdrawal(incoming()) && incoming().createdAt == request.time;
-        allow update: if (isOwner(userId) && isValidWithdrawal(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) || isAdmin();
+        allow update: if isOwner(userId) && isValidWithdrawal(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
       }
     }
   }
