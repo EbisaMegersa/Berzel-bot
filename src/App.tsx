@@ -24,10 +24,12 @@ import {
   Gift,
   Copy,
   Clock,
-  Trophy
+  Trophy,
+  Lock,
+  ShieldCheck
 } from 'lucide-react';
 import { db, auth, authStatus } from './lib/firebase';
-import { doc, setDoc, updateDoc, serverTimestamp, onSnapshot, increment, query, collection, where, getDocs, limit, orderBy, addDoc, writeBatch } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, serverTimestamp, onSnapshot, increment, query, collection, where, getDocs, limit, orderBy, addDoc, writeBatch, collectionGroup } from 'firebase/firestore';
 
 // --- Types ---
 interface UserProfile {
@@ -146,6 +148,12 @@ export default function App() {
     microtasks: []
   });
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
+
+  // Admin State
+  const [adminWithdrawals, setAdminWithdrawals] = useState<any[]>([]);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
+  const [adminFilter, setAdminFilter] = useState<'Pending' | 'Success' | 'Rejected'>('Pending');
+  const [processingId, setProcessingId] = useState<string | null>(null);
 
   // Micro Tasks State
   const [microTasksTimers, setMicroTasksTimers] = useState<Record<number, number>>({});
@@ -439,6 +447,102 @@ export default function App() {
       fetchLeaderboard(leaderboardCategory);
     }
   }, [activeTab, leaderboardCategory]);
+
+  // Fetch admin withdrawals
+  const fetchAdminWithdrawals = async () => {
+    const isAdminUser = profile?.telegramId === 2022805638 || userData?.id === 2022805638;
+    if (!isAdminUser) return;
+
+    setLoadingAdmin(true);
+    try {
+      const q = query(
+        collectionGroup(db, 'withdrawals'),
+        where('status', '==', adminFilter)
+      );
+      const querySnapshot = await getDocs(q);
+      const results: any[] = [];
+      querySnapshot.forEach((docSnap) => {
+        results.push({
+          id: docSnap.id,
+          ref: docSnap.ref,
+          path: docSnap.ref.path,
+          ...docSnap.data()
+        });
+      });
+      // Sort in-memory desc by createdAt
+      results.sort((a, b) => {
+        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt?.seconds ? a.createdAt.seconds * 1000 : 0);
+        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt?.seconds ? b.createdAt.seconds * 1000 : 0);
+        return timeB - timeA;
+      });
+      setAdminWithdrawals(results);
+    } catch (err) {
+      console.error("Error fetching admin withdrawals:", err);
+    } finally {
+      setLoadingAdmin(false);
+    }
+  };
+
+  // Process Admin updates (Success / Decline)
+  const handleAdminAction = async (withdrawal: any, newStatus: 'Success' | 'Rejected') => {
+    if (processingId) return;
+    setProcessingId(withdrawal.id);
+    const userDocRef = doc(db, `users/${withdrawal.userId}`);
+
+    try {
+      const batch = writeBatch(db);
+      
+      // Update withdrawal status
+      batch.update(withdrawal.ref, { 
+        status: newStatus,
+        processedAt: serverTimestamp()
+      });
+
+      if (newStatus === 'Success') {
+        // Approve: Mark user profile with consumedInvites increment, has_withdrawn and reset ads
+        batch.update(userDocRef, {
+          consumedInvites: increment(20),
+          has_withdrawn: true,
+          adsSinceLastWithdrawal: 0,
+          updatedAt: serverTimestamp()
+        });
+      } else {
+        // Decline: Refund points to user balance
+        batch.update(userDocRef, {
+          balance: increment(withdrawal.amount),
+          updatedAt: serverTimestamp()
+        });
+      }
+
+      await batch.commit();
+
+      // Refresh the list locally
+      fetchAdminWithdrawals();
+
+      try {
+        (window as any).Telegram?.WebApp?.showAlert(`Withdrawal request marked as ${newStatus}!`);
+        (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+      } catch {
+        alert(`Withdrawal request marked as ${newStatus}!`);
+      }
+
+    } catch (err) {
+      console.error(`Error processing admin action to ${newStatus}:`, err);
+      try {
+        (window as any).Telegram?.WebApp?.showAlert("Failed to process request.");
+      } catch {
+        alert("Failed to process request.");
+      }
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'admin') {
+      fetchAdminWithdrawals();
+    }
+  }, [activeTab, adminFilter, profile, userData]);
 
   const handleWatchAd = async () => {
     if (isWatching || !auth.currentUser || !profile) return;
@@ -947,15 +1051,15 @@ export default function App() {
       <header className="px-6 pt-6 pb-4 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-white tracking-tight">
-            Leaderboard
+            {activeTab === 'leaderboard' ? 'Leaderboard' : 'Admin Panel'}
           </h1>
           <p className="text-sm text-[#A0AEC0] mt-0.5">
-            Overall top 20 active champions
+            {activeTab === 'leaderboard' ? 'Overall top 20 active champions' : 'Process user withdrawals'}
           </p>
         </div>
         <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-[#10B981] to-[#059669] flex items-center justify-center border border-white/10 shadow-lg shadow-[#10B981]/10 p-0.5">
           <div className="w-full h-full rounded-full bg-[#061B1B] flex items-center justify-center">
-             <Trophy className="w-4 h-4 text-white" />
+             {activeTab === 'leaderboard' ? <Trophy className="w-4 h-4 text-white" /> : <ShieldCheck className="w-4 h-4 text-white" />}
           </div>
         </div>
       </header>
@@ -1385,6 +1489,154 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : activeTab === 'admin' ? (
+          <div className="space-y-6 pb-12 animate-fade-in">
+            {/* Admin status banner */}
+            <div className="stats-card rounded-3xl p-6 bg-gradient-to-br from-[#10B981]/10 to-transparent border border-white/10 flex flex-col items-center text-center">
+              <div className="w-16 h-16 rounded-2xl bg-[#10B981]/10 flex items-center justify-center mb-4 border border-[#10B981]/20 shadow-lg shadow-[#10B981]/10">
+                <ShieldCheck className="w-8 h-8 text-[#10B981]" />
+              </div>
+              <h2 className="text-xl font-bold text-white uppercase tracking-tight">Withdrawal Requests</h2>
+              <p className="text-xs text-[#A0AEC0] max-w-xs mt-1">
+                Verify and process cash-out transactions. Approve or refuse securely.
+              </p>
+            </div>
+
+            {/* Admin verification gate */}
+            {!(profile?.telegramId === 2022805638 || userData?.id === 2022805638) ? (
+              <div className="stats-card rounded-3xl p-10 text-center border border-red-500/20 bg-red-500/5">
+                <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mx-auto mb-4 text-red-500">
+                  <Lock size={24} />
+                </div>
+                <h3 className="text-base font-bold text-white uppercase tracking-wider">RESTRICTED SECTION</h3>
+                <p className="text-xs text-[#A0AEC0] mt-2 mb-6">
+                  Only authorized administrators (Telegram ID: 2022805638) are allowed to access this panel.
+                </p>
+                <div className="text-[10px] bg-white/5 inline-block px-3 py-1.5 rounded-lg text-white/40 font-mono">
+                  Your Telegram ID: {userData?.id || 'Unknown/No session'}
+                </div>
+              </div>
+            ) : (
+              // ADMIN ACTUAL VIEW
+              <div className="space-y-6">
+                {/* Status Switcher */}
+                <div className="grid grid-cols-3 gap-2 bg-black/20 p-1.5 rounded-2xl border border-white/5">
+                  {(['Pending', 'Success', 'Rejected'] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      onClick={() => setAdminFilter(filter)}
+                      className={`py-3 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all duration-300 ${
+                        adminFilter === filter 
+                          ? filter === 'Pending' ? 'bg-yellow-600 text-white shadow-lg' :
+                            filter === 'Success' ? 'bg-[#10B981] text-white shadow-lg' :
+                            'bg-red-600 text-white shadow-lg'
+                          : 'text-[#A0AEC0] hover:text-white'
+                      }`}
+                    >
+                      {filter}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Withdrawals list */}
+                {loadingAdmin ? (
+                  <div className="flex flex-col items-center justify-center py-20 gap-3">
+                    <Loader2 className="w-8 h-8 text-[#10B981] animate-spin" />
+                    <p className="text-[10px] text-[#A0AEC0] uppercase tracking-widest text-center">Loading requests...</p>
+                  </div>
+                ) : adminWithdrawals.length === 0 ? (
+                  <div className="stats-card rounded-3xl p-10 text-center border border-white/5">
+                    <p className="text-[#A0AEC0] text-sm opacity-60">No {adminFilter.toLowerCase()} requests found.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {adminWithdrawals.map((withdrawal) => {
+                      const methodIcon = [
+                        { id: 'usdt_trc20', img: 'https://cryptologos.cc/logos/tether-usdt-logo.png' },
+                        { id: 'usdt_bep20', img: 'https://cryptologos.cc/logos/tether-usdt-logo.png' },
+                        { id: 'ton', img: 'https://cryptologos.cc/logos/toncoin-ton-logo.png' },
+                        { id: 'binance', img: 'https://upload.wikimedia.org/wikipedia/commons/e/e8/Binance_Logo.svg' },
+                      ].find(m => m.id === withdrawal.method)?.img;
+
+                      return (
+                        <div key={withdrawal.id} className="stats-card rounded-[24px] p-5 border border-white/5 space-y-4 bg-[#082222]">
+                          {/* Top part: user and amount info */}
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center p-2">
+                                <img src={methodIcon} alt={withdrawal.method} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                              </div>
+                              <div>
+                                <h4 className="text-sm font-black text-white">{withdrawal.username}</h4>
+                                <p className="text-[10px] text-[#A0AEC0] font-mono">TG: {withdrawal.telegramId || 'N/A'}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-base font-black text-[#10B981]">{withdrawal.amount} pts</span>
+                              <p className="text-[10px] text-white/50">~${(withdrawal.amount * POINT_TO_USD).toFixed(2)}</p>
+                            </div>
+                          </div>
+
+                          {/* Address / UID field */}
+                          <div className="p-3 bg-black/40 rounded-xl border border-white/5 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[9px] font-bold text-[#A0AEC0] uppercase tracking-wider block">
+                                {withdrawal.method === 'binance' ? 'Exchange UID' : 'Payment Address'}
+                              </span>
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(withdrawal.method === 'binance' ? (withdrawal.uid || '') : (withdrawal.address || ''));
+                                  alert('Copied to clipboard!');
+                                }}
+                                className="text-[9px] text-[#10B981] hover:underline flex items-center gap-1 font-bold"
+                              >
+                                <Copy size={10} /> Copy
+                              </button>
+                            </div>
+                            <p className="text-xs font-mono text-white break-all">
+                              {withdrawal.method === 'binance' ? withdrawal.uid : withdrawal.address}
+                            </p>
+                          </div>
+
+                          {/* Status and Action buttons */}
+                          <div className="flex items-center justify-between pt-1">
+                            <span className="text-[9px] text-[#A0AEC0] uppercase font-bold">
+                              Requested: {withdrawal.createdAt?.toMillis ? new Date(withdrawal.createdAt.toMillis()).toLocaleString() : 'Just now'}
+                            </span>
+                            
+                            {withdrawal.status === 'Pending' ? (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleAdminAction(withdrawal, 'Rejected')}
+                                  disabled={!!processingId}
+                                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all"
+                                >
+                                  Decline 👎
+                                </button>
+                                <button
+                                  onClick={() => handleAdminAction(withdrawal, 'Success')}
+                                  disabled={!!processingId}
+                                  className="px-3 py-1.5 bg-[#10B981] hover:bg-[#059669] disabled:opacity-50 text-black text-[10px] font-black uppercase tracking-wider rounded-lg transition-all"
+                                >
+                                  {processingId === withdrawal.id ? '...' : 'Success 👍'}
+                                </button>
+                              </div>
+                            ) : (
+                              <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider ${
+                                withdrawal.status === 'Success' ? 'bg-[#10B981]/15 text-[#10B981]' : 'bg-red-500/10 text-red-500'
+                              }`}>
+                                {withdrawal.status}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         ) : activeTab === 'wallet' ? (
           <div className="space-y-6 pb-10">
             <h2 className="text-2xl font-black text-white px-2">Withdraw</h2>
@@ -1783,8 +2035,9 @@ export default function App() {
 
       {/* Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 py-4 pb-8 px-2 sm:px-6 nav-blur z-50">
-        <div className="max-w-md mx-auto flex items-center justify-center">
-          <NavItem icon={<Trophy />} label="Leaderboard" active={true} onClick={() => {}} />
+        <div className="max-w-md mx-auto flex items-center justify-center gap-12">
+          <NavItem icon={<Trophy />} label="Leaderboard" active={activeTab === 'leaderboard'} onClick={() => setActiveTab('leaderboard')} />
+          <NavItem icon={<ShieldCheck />} label="Admin" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />
         </div>
       </nav>
     </div>
